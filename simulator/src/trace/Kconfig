@@ -1,0 +1,45 @@
+menu "Testing and Debugging"
+config TRACE
+  bool "Enable tracer"
+  default y
+config MEMORY_TRACE
+  bool "Open Memory Trace"
+  default n
+config FUNC_TRACE
+  bool "Open Function Trace"
+  default n
+config DEVICE_TRACE
+  bool "Open Device Trace"
+  default n
+config WATCH_POINT
+  bool "open watch_point"
+  default n
+
+config TRACE_START
+  depends on TRACE
+  int "When tracing is enabled (unit: number of instructions)"
+  default 0
+
+config TRACE_END
+  depends on TRACE
+  int "When tracing is disabled (unit: number of instructions)"
+  default 1000
+
+config ITRACE
+  depends on TRACE
+  bool "Enable instruction tracer"
+  default y
+
+config ITRACE_COND
+  depends on ITRACE
+  string "Only trace instructions when the condition is true"
+  default "true"
+
+config DIFFTEST
+  depends on TARGET_NATIVE_ELF
+  bool "Enable differential testing"
+  default n
+  help
+    Enable differential testing with a reference design.
+    Note that this will significantly reduce the performance of NEMU.'
+endmenu
