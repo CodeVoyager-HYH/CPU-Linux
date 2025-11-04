@@ -361,7 +361,7 @@ module lsu
   // 加载操作流水线寄存器：暂存有效标记、事务ID、结果、异常
   shift_reg #(
       .dtype(logic [$bits(ld_valid) + $bits(ld_trans_id) + $bits(ld_result) + $bits(ld_ex) - 1:0]),
-      .Depth(CVA6Cfg.NrLoadPipeRegs)  // 流水线深度（配置参数）
+      .Depth(NrLoadPipeRegs)  // 流水线深度（配置参数）
   ) i_pipe_reg_load (
       .clk_i,
       .rst_ni,
@@ -372,7 +372,7 @@ module lsu
   // 存储操作流水线寄存器：暂存有效标记、事务ID、结果、异常
   shift_reg #(
       .dtype(logic [$bits(st_valid) + $bits(st_trans_id) + $bits(st_result) + $bits(st_ex) - 1:0]),
-      .Depth(CVA6Cfg.NrStorePipeRegs)  // 流水线深度（配置参数）
+      .Depth(NrStorePipeRegs)  // 流水线深度（配置参数）
   ) i_pipe_reg_store (
       .clk_i,
       .rst_ni,
@@ -385,7 +385,7 @@ module lsu
     ld_valid_i           = 1'b0;
     st_valid_i           = 1'b0;
     cva6_translation_req = 1'b0;
-    cva6_mmu_vaddr       = {CVA6Cfg.VLEN{1'b0}};
+    cva6_mmu_vaddr       = {VLEN{1'b0}};
     mmu_tinst            = {32{1'b0}};
     mmu_hs_ld_st_inst    = 1'b0;
     mmu_hlvx_inst        = 1'b0;
@@ -461,13 +461,13 @@ module lsu
         LOAD: begin
           cva6_misaligned_exception.cause = riscv::LD_ADDR_MISALIGNED;  // 加载地址未对齐
           cva6_misaligned_exception.valid = 1'b1;
-          cva6_misaligned_exception.tval  = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, lsu_ctrl.vaddr}; 
+          cva6_misaligned_exception.tval  = {{XLEN - VLEN{1'b0}}, lsu_ctrl.vaddr}; 
         end
 
         STORE: begin
           cva6_misaligned_exception.cause = riscv::ST_ADDR_MISALIGNED;  // 存储地址未对齐
           cva6_misaligned_exception.valid = 1'b1;
-          cva6_misaligned_exception.tval  = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, lsu_ctrl.vaddr};
+          cva6_misaligned_exception.tval  = {{XLEN - VLEN{1'b0}}, lsu_ctrl.vaddr};
         end
         default: ;
       endcase

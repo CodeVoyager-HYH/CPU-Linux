@@ -56,7 +56,7 @@ module issue_read #(
   typedef struct packed {
     logic none, load, store, alu, alu2, ctrl_flow, mult, csr, fpu, fpu_vec, cvxif, accel, aes;
   } fus_busy_t;
-  fus_busy_t [CVA6Cfg.NrIssuePorts-1:0] fus_busy;
+  fus_busy_t [NrIssuePorts-1:0] fus_busy;
 
   logic [config_pkg::XLEN-1:0]          rs1_res, rs2_res;
   logic [config_pkg::NR_SB_ENTRIES-1:0] fwd_res_valid;

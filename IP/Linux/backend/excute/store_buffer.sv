@@ -104,7 +104,7 @@ module store_buffer
   assign req_port_o.data_id = '0;
 
   // 缓存地址拆分：按DCache格式拆分索引（Index）和标记（Tag）
-  assign req_port_o.address_index = commit_queue_q[commit_read_pointer_q].address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0];
+  assign req_port_o.address_index = commit_queue_q[commit_read_pointer_q].address[DCACHE_INDEX_WIDTH-1:0];
   assign req_port_o.address_tag   = commit_queue_q[commit_read_pointer_q].address[DCACHE_TAG_WIDTH + DCACHE_INDEX_WIDTH - 1 : DCACHE_INDEX_WIDTH];
 
   // 缓存数据信号：直接从提交队列当前项读取

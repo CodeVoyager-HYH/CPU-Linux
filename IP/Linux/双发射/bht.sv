@@ -27,7 +27,7 @@ module bht (
 
   assign bht_jump_pc             = vpc_i + imm_i;
 
-  for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_bht_output
+  for (genvar i = 0; i < INSTR_PER_FETCH; i++) begin : gen_bht_output
       assign bht_prediction_o[i].valid = bht_q[index][i].valid;
       assign bht_prediction_o[i].taken = bht_q[index][i].saturation_counter[1] == 1'b1;
   end

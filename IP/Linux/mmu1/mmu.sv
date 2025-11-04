@@ -104,28 +104,28 @@ module mmu
   logic ptw_error_at_g_st;  //Hypervisor模式） PTW threw an exception at the G-Stage
   logic ptw_err_at_g_int_st;  // PTW threw an exception at the G-Stage during S-Stage translation
   logic ptw_access_exception;  //PTW访问异常 PTW threw an access exception (PMPs)
-  logic [CVA6Cfg.PLEN-1:0] ptw_bad_paddr;  //PTW出错的物理地址 PTW page fault bad physical addr
-  logic [CVA6Cfg.GPLEN-1:0] ptw_bad_gpaddr;  //（Hypervisor模式） PTW guest page fault bad guest physical addr
+  logic [PLEN-1:0] ptw_bad_paddr;  //PTW出错的物理地址 PTW page fault bad physical addr
+  logic [GPLEN-1:0] ptw_bad_gpaddr;  //（Hypervisor模式） PTW guest page fault bad guest physical addr
 
-  logic [CVA6Cfg.VLEN-1:0] update_vaddr, shared_tlb_vaddr; // 更新/共享TLB的虚拟地址
+  logic [VLEN-1:0] update_vaddr, shared_tlb_vaddr; // 更新/共享TLB的虚拟地址
 
   tlb_update_cva6_t update_itlb, update_dtlb, update_shared_tlb;// ITLB/DTLB/共享TLB的更新信息
 
   logic                               itlb_lu_access;
   pte_cva6_t                          itlb_content;
   pte_cva6_t                          itlb_g_content;
-  logic      [  CVA6Cfg.PtLevels-2:0] itlb_is_page;
+  logic      [  PtLevels-2:0] itlb_is_page;
   logic                               itlb_lu_hit;
-  logic      [     CVA6Cfg.GPLEN-1:0] itlb_gpaddr;
-  logic      [CVA6Cfg.ASID_WIDTH-1:0] itlb_lu_asid;
+  logic      [     GPLEN-1:0] itlb_gpaddr;
+  logic      [ASID_WIDTH-1:0] itlb_lu_asid;
 
   logic                               dtlb_lu_access;
   pte_cva6_t                          dtlb_content;
   pte_cva6_t                          dtlb_g_content;
-  logic      [  CVA6Cfg.PtLevels-2:0] dtlb_is_page;
-  logic      [CVA6Cfg.ASID_WIDTH-1:0] dtlb_lu_asid;
+  logic      [  PtLevels-2:0] dtlb_is_page;
+  logic      [TH-1:0] dtlb_lu_asid;
   logic                               dtlb_lu_hit;
-  logic      [     CVA6Cfg.GPLEN-1:0] dtlb_gpaddr;
+  logic      [     GPLEN-1:0] dtlb_gpaddr;
 
   logic shared_tlb_access, shared_tlb_miss;
   logic shared_tlb_hit, itlb_req;
@@ -147,7 +147,7 @@ module mmu
       .CVA6Cfg          (CVA6Cfg),
       .pte_cva6_t       (pte_cva6_t),
       .tlb_update_cva6_t(tlb_update_cva6_t),
-      .TLB_ENTRIES      (CVA6Cfg.InstrTlbEntries),
+      .TLB_ENTRIES      (InstrTlbEntries),
       .HYP_EXT          (HYP_EXT)
   ) i_itlb (
       .clk_i         (clk_i),
@@ -179,7 +179,7 @@ module mmu
       .CVA6Cfg          (CVA6Cfg),
       .pte_cva6_t       (pte_cva6_t),
       .tlb_update_cva6_t(tlb_update_cva6_t),
-      .TLB_ENTRIES      (CVA6Cfg.DataTlbEntries),
+      .TLB_ENTRIES      (DataTlbEntries),
       .HYP_EXT          (HYP_EXT)
   ) i_dtlb (
       .clk_i         (clk_i),
@@ -258,7 +258,7 @@ module mmu
   );
 
   // PTW
-  cva6_ptw #(
+  ptw #(
       .CVA6Cfg          (CVA6Cfg),
       .pte_cva6_t       (pte_cva6_t),
       .tlb_update_cva6_t(tlb_update_cva6_t),
@@ -273,16 +273,10 @@ module mmu
       .ptw_active_o          (ptw_active),
       .walking_instr_o       (walking_instr),
       .ptw_error_o           (ptw_error),
-      .ptw_error_at_g_st_o   (ptw_error_at_g_st),
-      .ptw_err_at_g_int_st_o (ptw_err_at_g_int_st),
       .ptw_access_exception_o(ptw_access_exception),
+
       .enable_translation_i,
-      .enable_g_translation_i,
       .en_ld_st_translation_i,
-      .en_ld_st_g_translation_i,
-      .v_i,
-      .ld_st_v_i,
-      .hlvx_inst_i           (hlvx_inst_i),
 
       .lsu_is_store_i(lsu_is_store_i),
       // PTW memory interface
@@ -295,8 +289,6 @@ module mmu
       .update_vaddr_o(update_vaddr),
 
       .asid_i,
-      .vs_asid_i,
-      .vmid_i,
 
       // from shared TLB
       // did we miss?
@@ -307,10 +299,7 @@ module mmu
       .itlb_req_i(itlb_req),
 
       .satp_ppn_i,
-      .vsatp_ppn_i,
-      .hgatp_ppn_i,
       .mxr_i,
-      .vmxr_i,
 
       // Performance counters
       .shared_tlb_miss_o(shared_tlb_miss),  //open for now
@@ -318,25 +307,20 @@ module mmu
       // PMP
       .pmpcfg_i   (pmpcfg_i),
       .pmpaddr_i  (pmpaddr_i),
-      .bad_paddr_o(ptw_bad_paddr),
-      .bad_gpaddr_o(ptw_bad_gpaddr)
+      .bad_paddr_o(ptw_bad_paddr)
   );
 
   //====================
   // 指令接口组合逻辑
   //====================
-  logic [CVA6Cfg.VLEN-1:0] lsu_vaddr_n, lsu_vaddr_q;
-  logic [CVA6Cfg.GPLEN-1:0] lsu_gpaddr_n, lsu_gpaddr_q;
-  logic [31:0] lsu_tinst_n, lsu_tinst_q;
-  logic hs_ld_st_inst_n, hs_ld_st_inst_q;
+  logic [VLEN-1:0] lsu_vaddr_n, lsu_vaddr_q;
   pte_cva6_t dtlb_pte_n, dtlb_pte_q;
-  pte_cva6_t dtlb_gpte_n, dtlb_gpte_q;
   logic lsu_req_n, lsu_req_q;
   logic lsu_is_store_n, lsu_is_store_q;
   logic dtlb_hit_n, dtlb_hit_q;
-  logic [CVA6Cfg.PtLevels-2:0] dtlb_is_page_n, dtlb_is_page_q;
+  logic [PtLevels-2:0] dtlb_is_page_n, dtlb_is_page_q;
   exception_t misaligned_ex_n, misaligned_ex_q;
-  localparam int PPNWMin = (CVA6Cfg.PPNW - 1 > 29) ? 29 : CVA6Cfg.PPNW - 1;
+  localparam int PPNWMin = PPNW - 1;
   assign lsu_dtlb_hit_o = (en_ld_st_translation_i || en_ld_st_g_translation_i) ? dtlb_lu_hit : 1'b1;
 
   always_comb begin 
@@ -346,8 +330,8 @@ module mmu
     icache_areq_o.fetch_exception = '0;// 异常可能是：1.特权级不匹配 2.PTW发来异常
 
     // 检查指令访问权限错误
-    iaccess_err = icache_areq_i.fetch_req && enable_translation_i &&  (((priv_lvl_i == riscv::PRIV_LVL_U) && ~itlb_content.u)  
-    || ((priv_lvl_i == riscv::PRIV_LVL_S) && itlb_content.u));
+    iaccess_err = icache_areq_i.fetch_req && enable_translation_i &&  (((priv_lvl_i == PRIV_LVL_U) && ~itlb_content.u)  
+    || ((priv_lvl_i == PRIV_LVL_S) && itlb_content.u));
 
     // 默认赋值
     lsu_vaddr_n = lsu_vaddr_i;

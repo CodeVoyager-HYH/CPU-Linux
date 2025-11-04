@@ -39,7 +39,7 @@ module divider
   logic op_b_zero, op_b_zero_q, op_b_zero_d;
   logic op_b_neg_one, op_b_neg_one_q, op_b_neg_one_d;
 
-  logic [CVA6Cfg.TRANS_ID_BITS-1:0] id_q, id_d;
+  logic [TRANS_ID_BITS-1:0] id_q, id_d;
 
   logic rem_sel_d, rem_sel_q;
   logic comp_inv_d, comp_inv_q;

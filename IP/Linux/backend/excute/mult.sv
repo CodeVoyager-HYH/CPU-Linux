@@ -102,7 +102,7 @@ module moduleName
 
   serdiv #(
       .CVA6Cfg(CVA6Cfg),
-      .WIDTH  (CVA6Cfg.XLEN)
+      .WIDTH  (XLEN)
   ) i_div (
       .clk_i    (clk_i),
       .rst_ni   (rst_ni),

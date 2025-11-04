@@ -38,7 +38,7 @@ module instr_realign (
 
     always_comb begin : re_align        // 这里只考虑取指是32位的
         unaligned_d         = 1'b0;
-        unaligned_address_d = {address_i[CVA6Cfg.VLEN-1:2], 2'b10}; // 四字节是永远对齐的，所以这里直接二字节对齐
+        unaligned_address_d = {address_i[VLEN-1:2], 2'b10}; // 四字节是永远对齐的，所以这里直接二字节对齐
         unaligned_instr_d   = unaligned_instr_q;
 
         valid_o[0] = valid_i;   // 因为输入是32位，valid_i只能判断指令是不是有效，只能判断一个，另一个需要看是不是压缩指令判断
@@ -46,7 +46,7 @@ module instr_realign (
         addr_o [0] = unaligned_q? unaligned_address_q: address_i;
         valid_o[1] = 1'b0;   
         instr_o[1] = '0;
-        addr_o [1] = {address_i[CVA6Cfg.VLEN-1:2], 2'b10};
+        addr_o [1] = {address_i[VLEN-1:2], 2'b10};
 
         if(instr_is_compressed_o[0] || unaligned_q) begin // 第一条指令是压缩指令
             if(instr_is_compressed_o[1]) begin
@@ -57,7 +57,7 @@ module instr_realign (
             end
             else begin  //第二条是正常指令，需要拼接指令
                 unaligned_d = 1'b1;
-                unaligned_address_d = {address_i[CVA6Cfg.VLEN-1:2], 2'b10};
+                unaligned_address_d = {address_i[VLEN-1:2], 2'b10};
                 unaligned_instr_d = data_i[31:16];
             end
         end
@@ -66,7 +66,7 @@ module instr_realign (
             if(!instr_is_compressed_o[0]) begin   // 非压缩指令
                 valid_o = '0;
                 unaligned_d = 1'b1;
-                unaligned_address_d = {address_i[CVA6Cfg.VLEN-1:2], 2'b10};
+                unaligned_address_d = {address_i[VLEN-1:2], 2'b10};
                 unaligned_instr_d = data_i[15:0];
             end
             else begin

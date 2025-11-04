@@ -31,7 +31,7 @@ module branch_unit
     resolved_branch_o.cf_type = branch_predict_i.cf;  
     
     next_pc  = pc_i + {{VLEN-3{1'b0}}, 3'h4}; // 默认顺序执行
-    target_address = $unsigned($signed(jump_base) + $signed(fu_data_i.imm[CVA6Cfg.VLEN-1:0]));
+    target_address = $unsigned($signed(jump_base) + $signed(fu_data_i.imm[VLEN-1:0]));
     if (fu_data_i.operation == JALR) begin
       target_address[0] = 1'b0;
     end

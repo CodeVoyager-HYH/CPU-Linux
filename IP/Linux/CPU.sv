@@ -26,14 +26,14 @@ module CPU #(
 
   localparam type branchpredict_sbe_t = struct packed {
       cf_t                     cf;               // type of control flow prediction
-      logic [CVA6Cfg.VLEN-1:0] predict_address;  // target address at which to jump, or not
+      logic [VLEN-1:0] predict_address;  // target address at which to jump, or not
     },
 
   parameter type exception_t = struct packed {
-      logic [CVA6Cfg.XLEN-1:0] cause;  // cause of exception
-      logic [CVA6Cfg.XLEN-1:0] tval;  // additional information of causing exception (e.g.: instruction causing it),
+      logic [XLEN-1:0] cause;  // cause of exception
+      logic [XLEN-1:0] tval;  // additional information of causing exception (e.g.: instruction causing it),
       // address of LD/ST fault
-      logic [CVA6Cfg.GPLEN-1:0] tval2;  // additional information when the causing exception in a guest exception
+      logic [GPLEN-1:0] tval2;  // additional information when the causing exception in a guest exception
       logic [31:0] tinst;  // transformed instruction information
       logic gva;  // signals when a guest virtual address is written to tval
       logic valid;
@@ -42,16 +42,16 @@ module CPU #(
   localparam type fu_data_t = struct packed {
       fu_t                              fu;
       fu_op                             operation;
-      logic [CVA6Cfg.XLEN-1:0]          operand_a;
-      logic [CVA6Cfg.XLEN-1:0]          operand_b;
+      logic [XLEN-1:0]          operand_a;
+      logic [XLEN-1:0]          operand_b;
       logic [$clog2(config_pkg::NR_SB_ENTRIES):0] issue_pointer;
-      logic [CVA6Cfg.XLEN-1:0]          imm;
-      logic [CVA6Cfg.XLEN-1:0]          pc;
-      logic [CVA6Cfg.TRANS_ID_BITS-1:0] pointer;
+      logic [XLEN-1:0]          imm;
+      logic [XLEN-1:0]          pc;
+      logic [TRANS_ID_BITS-1:0] pointer;
     },
 
   localparam type scoreboard_entry_t = struct packed {
-      logic [CVA6Cfg.VLEN-1:0] pc;  // PC of instruction
+      logic [VLEN-1:0] pc;  // PC of instruction
       // with the transaction id in any case make the width more generic
       fu_t fu;  // functional unit to use
       fu_op op;  // operation to perform in each functional unit
@@ -61,7 +61,7 @@ module CPU #(
       logic [copnfig_pkg::XLEN-1:0] imm;//新加
       //====================
       logic [REG_ADDR_SIZE-1:0] rd;  // register destination address
-      logic [CVA6Cfg.XLEN-1:0] result;  // for unfinished instructions this field also holds the immediate,
+      logic [XLEN-1:0] result;  // for unfinished instructions this field also holds the immediate,
       // for unfinished floating-point that are partly encoded in rs2, this field also holds rs2
       // for unfinished floating-point fused operations (FMADD, FMSUB, FNMADD, FNMSUB)
       // this field holds the address of the third operand from the floating-point register file
