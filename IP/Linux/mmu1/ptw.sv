@@ -183,7 +183,7 @@ module ptw
     global_mapping_n        = global_mapping_q;
     tlb_update_asid_n       = tlb_update_asid_q;
     vaddr_n                 = vaddr_q;
-    shared_tlb_miss_o       = 1'b0;  // 默认无TLB未命中
+    shared_tlb_miss_o       = 1'b0;  // 默认TLB命中
 
     case (state_q)
       IDLE: begin  // 空闲状态：等待TLB未命中请求
@@ -191,7 +191,7 @@ module ptw
         global_mapping_n = 1'b0;  // 重置全局映射标志
         is_instr_ptw_n   = 1'b0;  // 重置指令遍历标志
 
-        // 若TLB未命中且需要地址转换，则启动页表遍历
+        // 若TLB未命中且需要地址转换，则启动页表遍历, 共享tlb是tlb命中的最后一环
         if (shared_tlb_access_i && ~shared_tlb_hit_i) begin
           // 计算S-stage页表地址，特权级手册虚拟地址转换第一步，a = satp.ppn × PAGESIZE
           ptw_pptr_n = {satp_ppn_i, shared_tlb_vaddr_i[SV-1:SV-(VpnLen/PtLevels)], (PtLevels)'(0)};

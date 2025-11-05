@@ -3,7 +3,8 @@ module pseudoLRU #(
 )(
     input logic clk_i,
     input logic rst_ni,
-
+    
+    input logic en,
     input logic access_hit_i, 
     input logic [$clog2(ENTRIES)-1:0] access_idx_i,
     output logic [$clog2(ENTRIES)-1:0] replacement_idx_o
@@ -76,10 +77,12 @@ end
 always_comb begin
     replacement_idx_o = '0; 
     found2 = 1'b0;
-    for (int unsigned iter = 0; (iter < $unsigned(ENTRIES)) && (!found2); iter++) begin
-        if (replace_en[iter] == 1'b1) begin
-            replacement_idx_o = cast_integer(iter);
-            found2 = 1'b1;
+    if(en) begin
+        for (int unsigned iter = 0; (iter < $unsigned(ENTRIES)) && (!found2); iter++) begin
+            if (replace_en[iter] == 1'b1) begin
+                replacement_idx_o = cast_integer(iter);
+                found2 = 1'b1;
+            end
         end
     end
 end

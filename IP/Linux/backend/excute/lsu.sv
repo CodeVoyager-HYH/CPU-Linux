@@ -108,6 +108,7 @@ module lsu
   logic [PLEN-1:0] mmu_paddr, cva6_mmu_paddr, acc_mmu_paddr, lsu_paddr; // 物理地址
   logic [31:0] mmu_tinst;                      // MMU陷阱指令
   logic mmu_hs_ld_st_inst, mmu_hlvx_inst;      // MMU虚拟化标记
+  input logic en_ld_st_translation_i,
   
   // 异常信号（MMU/PMP/未对齐）
   exception_t mmu_exception, cva6_mmu_exception, acc_mmu_exception;

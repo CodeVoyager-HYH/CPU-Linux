@@ -10,7 +10,8 @@ localparam int               FU_LEN           = 3;// ALU FSU Brache_unit mult de
 localparam int      unsigned XLEN_ALIGN_BYTES = $clog2(XLEN / 8);
 localparam int               LOAD_BUFF_SIZE   = 8;
 localparam NrPMPEntries = 16; // PMP entries 数量
-
+localparam MODE_SV = 8;
+localparam SV =  39;
   // --------------------
 // 非密等区域
 localparam                   NrMaxRules       = 16; // 非密等区域最大的配置数量

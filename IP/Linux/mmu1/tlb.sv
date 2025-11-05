@@ -1,13 +1,17 @@
 module tlb 
   import config_pkg::*;
   import mmu_pkg::*;
-#() (
+#(  
+  parameter type pte_cva6_t = logic,
+  parameter type tlb_update_cva6_t = logic,
+  parameter int unsigned TLB_ENTRIES = 4
+) (
   input logic clk_i,
   input logic rst_ni,
   input logic flush_i,
 
   // 更新信息
-  input tlb_update_cva6_t update_i,
+  input   tlb_update_cva6_t       update_i,
   input   logic [ASID_WIDTH-1:0]  asid_to_be_flushed_i,   // 待刷新的ASID
   input   logic [VLEN-1:0]        vaddr_to_be_flushed_i,  // 待刷新的虚拟地址
 
@@ -15,7 +19,6 @@ module tlb
   input   logic                   lu_access_i,            // 查找请求有效
   input   logic [ASID_WIDTH-1:0]  lu_asid_i,              // 查找的ASID（地址空间ID）
   input   logic [VLEN-1:0]        lu_vaddr_i,             // 待查找的虚拟地址
-  output  logic [GPLEN-1:0]       lu_gpaddr_o,            // 查找到的guest物理地址
   output  pte_cva6_t              lu_content_o,           // 查找到的S/VS-stage PTE
   output  logic [PtLevels-2:0]    lu_is_page_o,           // 查找到的页大小（如4K/2M）
   output  logic                   lu_hit_o                // 查找命中标志

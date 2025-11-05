@@ -223,7 +223,6 @@ module mmu
       .g_st_enbl_i   (enable_g_translation_i),
       .v_i           (v_i),
       .s_ld_st_enbl_i(en_ld_st_translation_i),
-      .g_ld_st_enbl_i(en_ld_st_g_translation_i),
       .ld_st_v_i     (ld_st_v_i),
 
       .dtlb_asid_i  (dtlb_lu_asid),

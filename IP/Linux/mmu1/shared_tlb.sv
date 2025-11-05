@@ -1,187 +1,80 @@
-module cva6_shared_tlb #(
-    parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
-    parameter type pte_cva6_t = logic,
-    parameter type tlb_update_cva6_t = logic,
-    parameter int SHARED_TLB_WAYS = 2,
-    parameter int unsigned HYP_EXT = 0
-
+module shared_tlb #(
+  parameters
 ) (
-    input logic clk_i,  // Clock
-    input logic rst_ni,  // Asynchronous reset active low
-    input logic flush_i,  // Flush normal translations signal
-    input logic flush_vvma_i,  // Flush vs stage signal
-    input logic flush_gvma_i,  // Flush g stage signal
-    input logic s_st_enbl_i,  // s-stage enabled
-    input logic g_st_enbl_i,  // g-stage enabled
-    input logic v_i,  // virtualization mode
-    input logic s_ld_st_enbl_i,  // s-stage enabled for load stores
-    input logic g_ld_st_enbl_i,  // g-stage enabled for load stores
-    input logic ld_st_v_i,  // virtualization mode for load stores
+  input   logic clk_n,
+  input   logic rst_ni,
+  input   logic flush_i,
 
-    input logic [CVA6Cfg.ASID_WIDTH-1:0] dtlb_asid_i,
-    input logic [CVA6Cfg.ASID_WIDTH-1:0] itlb_asid_i,
-    input logic [CVA6Cfg.VMID_WIDTH-1:0] lu_vmid_i,
+  input   logic [ASID_WIDTH-1:0]  dtlb_asid_i,
+  input   logic [ASID_WIDTH-1:0]  itlb_asid_i,
+  input   logic                   s_st_enbl_i,
+  input   logic                   s_ld_st_enbl_i,
 
-    // from TLBs
-    // did we miss?
-    input logic                    itlb_access_i,
-    input logic                    itlb_hit_i,
-    input logic [CVA6Cfg.VLEN-1:0] itlb_vaddr_i,
+  // 用于判断是哪一个tlb未命中
+  input   logic                   dtlb_access_i,
+  input   logic                   dtlb_hit_i,
+  input   logic [VLEN-1:0]        dtlb_va ddr_i,
 
-    input logic                    dtlb_access_i,
-    input logic                    dtlb_hit_i,
-    input logic [CVA6Cfg.VLEN-1:0] dtlb_vaddr_i,
+  input   logic                   itlb_access_i,
+  input   logic                   itlb_hit_i,
+  input   logic [VLEN-1:0]        itlb_vaddr_i,
 
-    input logic shared_tlb_miss_i,
+  input   logic                   shared_tlb_miss_i,
 
-    // to TLBs, update logic
-    output tlb_update_cva6_t itlb_update_o,
-    output tlb_update_cva6_t dtlb_update_o,
+  // 更新信号，用于把共享tlb的内容更新到对应的tlb中
+  output  tlb_update_cva6_t       itlb_update_o,
+  output  tlb_update_cva6_t       dtlb_update_o,
+  output  logic                   itlb_miss_o,
+  output  logic                   dtlb_miss_o,
 
-    // Performance counters
-    output logic itlb_miss_o,
-    output logic dtlb_miss_o,
-
-    output logic                    shared_tlb_access_o,
-    output logic                    shared_tlb_hit_o,
-    output logic [CVA6Cfg.VLEN-1:0] shared_tlb_vaddr_o,
-
-    output logic itlb_req_o,
-
-    // Update shared TLB in case of miss
-    input tlb_update_cva6_t shared_tlb_update_i
-
+  output  logic                   shared_tlb_access_o,
+  output  logic                   shared_tlb_hit_o,
+  output  logic [VLEN-1:0]        shared_tlb_vaddr_o,
+  output  logic                   itlb_req_o,
+  // share tlb更新信号
+  input   tlb_update_cva6_t       shared_tlb_update_i
 );
-
-  function logic [SHARED_TLB_WAYS-1:0] shared_tlb_way_bin2oh(input logic [$clog2(SHARED_TLB_WAYS
-)-1:0] in);
-    logic [SHARED_TLB_WAYS-1:0] out;
-    out     = '0;
-    out[in] = 1'b1;
-    return out;
-  endfunction
-
+  
   typedef struct packed {
-    logic [CVA6Cfg.ASID_WIDTH-1:0] asid;
-    logic [CVA6Cfg.VMID_WIDTH-1:0] vmid;
-    logic [CVA6Cfg.PtLevels+HYP_EXT-1:0][(CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)-1:0] vpn;
-    logic [CVA6Cfg.PtLevels-2:0][HYP_EXT:0] is_page;
-    logic [HYP_EXT*2:0] v_st_enbl;  // v_i,g-stage enabled, s-stage enabled
+    logic [ASID_WIDTH-1:0] asid;
+    logic [PtLevels-1:0][(VpnLen/PtLevels)-1:0] vpn;
+    logic [PtLevels-2:0] is_page;
   } shared_tag_t;
-
-  shared_tag_t shared_tag_wr;
-  shared_tag_t [SHARED_TLB_WAYS-1:0] shared_tag_rd;
-
-  logic [CVA6Cfg.SharedTlbDepth-1:0][SHARED_TLB_WAYS-1:0] shared_tag_valid_q, shared_tag_valid_d;
-
-  logic [               SHARED_TLB_WAYS-1:0] shared_tag_valid;
-
-  logic [               SHARED_TLB_WAYS-1:0] tag_wr_en;
-  logic [$clog2(CVA6Cfg.SharedTlbDepth)-1:0] tag_wr_addr;
-  logic [           $bits(shared_tag_t)-1:0] tag_wr_data;
-
-  logic [               SHARED_TLB_WAYS-1:0] tag_rd_en;
-  logic [$clog2(CVA6Cfg.SharedTlbDepth)-1:0] tag_rd_addr;
-  logic [           $bits(shared_tag_t)-1:0] tag_rd_data      [SHARED_TLB_WAYS-1:0];
-
-  logic [               SHARED_TLB_WAYS-1:0] tag_req;
-  logic [               SHARED_TLB_WAYS-1:0] tag_we;
-  logic [$clog2(CVA6Cfg.SharedTlbDepth)-1:0] tag_addr;
-
-  logic [               SHARED_TLB_WAYS-1:0] pte_wr_en;
-  logic [$clog2(CVA6Cfg.SharedTlbDepth)-1:0] pte_wr_addr;
-  logic [                  CVA6Cfg.XLEN-1:0] pte_wr_data      [                1:0];
-
-  logic [               SHARED_TLB_WAYS-1:0] pte_rd_en;
-  logic [$clog2(CVA6Cfg.SharedTlbDepth)-1:0] pte_rd_addr;
-  logic [                  CVA6Cfg.XLEN-1:0] pte_rd_data      [SHARED_TLB_WAYS-1:0] [HYP_EXT:0];
-
-  logic [               SHARED_TLB_WAYS-1:0] pte_req;
-  logic [               SHARED_TLB_WAYS-1:0] pte_we;
-  logic [$clog2(CVA6Cfg.SharedTlbDepth)-1:0] pte_addr;
-
-  logic [CVA6Cfg.PtLevels+HYP_EXT-1:0][(CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)-1:0] vpn_d, vpn_q;
-  logic [SHARED_TLB_WAYS-1:0][CVA6Cfg.PtLevels-1:0] vpn_match;
-  logic [SHARED_TLB_WAYS-1:0][CVA6Cfg.PtLevels-1:0] page_match;
-  logic [SHARED_TLB_WAYS-1:0][CVA6Cfg.PtLevels-1:0] level_match;
-
-  logic [SHARED_TLB_WAYS-1:0] match_asid;
-  logic [SHARED_TLB_WAYS-1:0] match_vmid;
-  logic [SHARED_TLB_WAYS-1:0] match_stage;
-
-  pte_cva6_t [SHARED_TLB_WAYS-1:0][HYP_EXT:0] pte;
-
-  logic [CVA6Cfg.VLEN-1-12:0] itlb_vpn_q;
-  logic [CVA6Cfg.VLEN-1-12:0] dtlb_vpn_q;
-
-  logic [CVA6Cfg.ASID_WIDTH-1:0] tlb_update_asid_q, tlb_update_asid_d;
-  logic [CVA6Cfg.VMID_WIDTH-1:0] tlb_update_vmid_q, tlb_update_vmid_d;
-
-  logic shared_tlb_access_q, shared_tlb_access_d;
-  logic shared_tlb_hit_d;
-  logic [CVA6Cfg.VLEN-1:0] shared_tlb_vaddr_q, shared_tlb_vaddr_d;
-
-  logic itlb_req_d, itlb_req_q;
-  logic dtlb_req_d, dtlb_req_q;
-
-  int i_req_d, i_req_q;
-
-  logic [1:0][2:0] v_st_enbl;
-
-  // replacement strategy
-  logic [SHARED_TLB_WAYS-1:0] way_valid;
-  logic update_lfsr;  // shift the LFSR
-  logic [$clog2(SHARED_TLB_WAYS)-1:0] inv_way;  // first non-valid encountered
-  logic [$clog2(SHARED_TLB_WAYS)-1:0] rnd_way;  // random index for replacement
-  logic [$clog2(SHARED_TLB_WAYS)-1:0] repl_way;  // way to replace
-  logic [SHARED_TLB_WAYS-1:0] repl_way_oh_d;  // way to replace (onehot)
-  logic all_ways_valid;  // we need to switch repl strategy since all are valid
 
   assign shared_tlb_access_o = shared_tlb_access_q;
   assign shared_tlb_hit_o = shared_tlb_hit_d;
   assign shared_tlb_vaddr_o = shared_tlb_vaddr_q;
   assign itlb_req_o = itlb_req_q;
-  assign v_st_enbl = {{v_i, g_st_enbl_i, s_st_enbl_i}, {ld_st_v_i, g_ld_st_enbl_i, s_ld_st_enbl_i}};
+  assign v_st_enbl = { s_st_enbl_i,  s_ld_st_enbl_i};
 
-  genvar i, x;
-  generate
-    for (i = 0; i < SHARED_TLB_WAYS; i++) begin : gen_match_tlb_ways
-      //identify page_match for all TLB Entries
-
-      for (x = 0; x < CVA6Cfg.PtLevels; x++) begin : gen_match
-        assign page_match[i][x] = x==0 ? 1 :((HYP_EXT==0 || x==(CVA6Cfg.PtLevels-1)) ? // PAGE_MATCH CONTAINS THE MATCH INFORMATION FOR EACH TAG OF is_1G and is_2M in sv39x4. HIGHER LEVEL (Giga page), THEN THERE IS THE Mega page AND AT THE LOWER LEVEL IS ALWAYS 1
-            &(shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x] | (~v_st_enbl[i_req_q][HYP_EXT:0])):
-                              ((&v_st_enbl[i_req_q][HYP_EXT:0]) ?
-                              ((shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x][0] && (shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-2-x][HYP_EXT] || shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x][HYP_EXT]))
-                            || (shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x][HYP_EXT] && (shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-2-x][0] || shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x][0]))):
-                                shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x][0] && v_st_enbl[i_req_q][0] || shared_tag_rd[i].is_page[CVA6Cfg.PtLevels-1-x][HYP_EXT] && v_st_enbl[i_req_q][HYP_EXT]));
-
-        //identify if vpn matches at all PT levels for all TLB entries
-        assign vpn_match[i][x]        = (HYP_EXT==1 && x==(CVA6Cfg.PtLevels-1) && ~v_st_enbl[i_req_q][0]) ? //
-            vpn_q[x] == shared_tag_rd[i].vpn[x] &&  vpn_q[x+HYP_EXT][(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels)-HYP_EXT:0] == shared_tag_rd[i].vpn[x+HYP_EXT][(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels)-HYP_EXT:0]: //
-            vpn_q[x] == shared_tag_rd[i].vpn[x];
-
-        //identify if there is a hit at each PT level for all TLB entries
-        assign level_match[i][x] = &vpn_match[i][CVA6Cfg.PtLevels-1:x] && page_match[i][x];
-
+  generate  // 匹配
+    for(genvar i = 0; i < SHARED_TLB_WAY; i++) begin // 遍历所有路
+      for(genvar x = 0; x < PtLevels; x++) begin // 遍历所有页表等级
+        assign page_match[i][x] = (x==0) ? 1 : 
+                                          (shared_tag_rd[i].is_page[PtLevels-1-x]);
+        assign vpn_match[i][x]  = (vpn_q[x] == shared_tag_rd[i].vpn[x]);
+        assign level_match[i][x] = &vpn_match[i][PtLevels-1:x] && page_match[i][x];
       end
     end
   endgenerate
 
-  genvar w;
   generate
-    for (w = 0; w < CVA6Cfg.PtLevels; w++) begin
-      assign vpn_d[w]               = ((|v_st_enbl[1][HYP_EXT:0]) && itlb_access_i && ~itlb_hit_i && ~dtlb_access_i) ? //
-          itlb_vaddr_i[12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(w+1))-1:12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*w)] :  //
-          (((|v_st_enbl[0][HYP_EXT:0]) && dtlb_access_i && ~dtlb_hit_i) ?  //
-          dtlb_vaddr_i[12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(w+1))-1:12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*w)] : vpn_q[w]);
+    // 遍历所有页表级别，更新当前VPN,VPN是9位，低12位是偏移量
+    for (genvar w = 0; w < PtLevels; w++) begin
+      assign vpn_d[w] = 
+          // 若ITLB访问且未命中，用ITLB的虚拟地址更新VPN
+          ((|v_st_enbl[1]) && itlb_access_i && ~itlb_hit_i && ~dtlb_access_i) ? 
+          itlb_vaddr_i[12+((VpnLen/PtLevels)*(w+1))-1:12+((VpnLen/PtLevels)*w)] : 
+          // 若DTLB访问且未命中，用DTLB的虚拟地址更新VPN
+          (((|v_st_enbl[0]) && dtlb_access_i && ~dtlb_hit_i) ? 
+          dtlb_vaddr_i[12+((VpnLen/PtLevels)*(w+1))-1:12+((VpnLen/PtLevels)*w)] : 
+          vpn_q[w]);  // 否则保持当前VPN
     end
   endgenerate
 
-  ///////////////////////////////////////////////////////
-  // tag comparison, hit generation
-  ///////////////////////////////////////////////////////
-  always_comb begin : itlb_dtlb_miss
+/////////////////////////////////
+
+always_comb begin : itlb_dtlb_miss
     itlb_miss_o         = 1'b0;
     dtlb_miss_o         = 1'b0;
 
@@ -201,28 +94,26 @@ module cva6_shared_tlb #(
     pte_rd_addr         = '0;
     i_req_d             = i_req_q;
 
-    // if we got an ITLB miss
-    if ((|v_st_enbl[1][HYP_EXT:0]) & itlb_access_i & ~itlb_hit_i & ~dtlb_access_i) begin
+    // ITLB 未命中
+    if ((v_st_enbl[1]) & itlb_access_i & ~itlb_hit_i & ~dtlb_access_i) begin
       tag_rd_en           = '1;
-      tag_rd_addr         = itlb_vaddr_i[12+:$clog2(CVA6Cfg.SharedTlbDepth)];
+      tag_rd_addr         = itlb_vaddr_i[12+:$clog2(SharedTlbDepth)];
       pte_rd_en           = '1;
-      pte_rd_addr         = itlb_vaddr_i[12+:$clog2(CVA6Cfg.SharedTlbDepth)];
+      pte_rd_addr         = itlb_vaddr_i[12+:$clog2(SharedTlbDepth)];
 
       itlb_miss_o         = shared_tlb_miss_i;
       itlb_req_d          = 1'b1;
       tlb_update_asid_d   = itlb_asid_i;
-      tlb_update_vmid_d   = lu_vmid_i;
 
       shared_tlb_access_d = '1;
       shared_tlb_vaddr_d  = itlb_vaddr_i;
       i_req_d             = 1;
 
-      // we got an DTLB miss
-    end else if ((|v_st_enbl[0]) & dtlb_access_i & ~dtlb_hit_i) begin
+    end else if ((v_st_enbl[0]) & dtlb_access_i & ~dtlb_hit_i) begin
       tag_rd_en           = '1;
-      tag_rd_addr         = dtlb_vaddr_i[12+:$clog2(CVA6Cfg.SharedTlbDepth)];
+      tag_rd_addr         = dtlb_vaddr_i[12+:$clog2(SharedTlbDepth)];
       pte_rd_en           = '1;
-      pte_rd_addr         = dtlb_vaddr_i[12+:$clog2(CVA6Cfg.SharedTlbDepth)];
+      pte_rd_addr         = dtlb_vaddr_i[12+:$clog2(SharedTlbDepth)];
 
       dtlb_miss_o         = shared_tlb_miss_i;
       dtlb_req_d          = 1'b1;
@@ -233,49 +124,46 @@ module cva6_shared_tlb #(
       shared_tlb_vaddr_d  = dtlb_vaddr_i;
       i_req_d             = 0;
     end
-  end  //itlb_dtlb_miss
+  end  
 
   always_comb begin : tag_comparison
     shared_tlb_hit_d = 1'b0;
     dtlb_update_o    = '0;
     itlb_update_o    = '0;
-    match_asid       = '{default: 0};
-    match_vmid       = CVA6Cfg.RVH ? '{default: 0} : '{default: 1};
 
+    for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
+        match_asid[i] = (((tlb_update_asid_q == shared_tag_rd[i].asid) || pte[i][0].g) && v_st_enbl[i_req_q][0]) || !v_st_enbl[i_req_q][0];
+        match_stage[i] = shared_tag_rd[i].v_st_enbl == v_st_enbl[i_req_q];
 
-      if (shared_tlb_update_i.valid) begin
-        shared_tlb_hit_d = 1'b1;
-        if (itlb_req_q) begin
-          itlb_update_o.valid = 1'b1;
-          itlb_update_o.vpn = shared_tlb_update_i.vpn;
-          itlb_update_o.is_page = shared_tlb_update_i.is_page;
-          itlb_update_o.content = shared_tlb_update_i.content;
-          itlb_update_o.g_content = shared_tlb_update_i.g_content;
-          itlb_update_o.v_st_enbl = v_st_enbl[i_req_q][HYP_EXT*2:0];
-          itlb_update_o.asid = shared_tlb_update_i.asid;
-          itlb_update_o.vmid = shared_tlb_update_i.vmid;
-
-        end else if (dtlb_req_q) begin
-          dtlb_update_o.valid = 1'b1;
-          dtlb_update_o.vpn = shared_tlb_update_i.vpn;
-          dtlb_update_o.is_page = shared_tlb_update_i.is_page;
-          dtlb_update_o.content = shared_tlb_update_i.content;
-          dtlb_update_o.g_content = shared_tlb_update_i.g_content;
-          dtlb_update_o.v_st_enbl = v_st_enbl[i_req_q][HYP_EXT*2:0];
-          dtlb_update_o.asid = shared_tlb_update_i.asid;
-          dtlb_update_o.vmid = shared_tlb_update_i.vmid;
+        if (shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_stage[i]) begin
+          if (|level_match[i]) begin
+            shared_tlb_hit_d = 1'b1;
+            if (itlb_req_q) begin
+              itlb_update_o.valid = 1'b1;
+              itlb_update_o.vpn = itlb_vpn_q;
+              itlb_update_o.is_page = shared_tag_rd[i].is_page;
+              itlb_update_o.content = pte[i][0];
+              itlb_update_o.v_st_enbl = shared_tag_rd[i].v_st_enbl;
+              itlb_update_o.asid = tlb_update_asid_q;
+            end else if (dtlb_req_q) begin
+              dtlb_update_o.valid = 1'b1;
+              dtlb_update_o.vpn = dtlb_vpn_q;
+              dtlb_update_o.is_page = shared_tag_rd[i].is_page;
+              dtlb_update_o.content = pte[i][0];
+              dtlb_update_o.v_st_enbl = shared_tag_rd[i].v_st_enbl;
+              dtlb_update_o.asid = tlb_update_asid_q;
+            end
+          end
         end
       end
+    
+  end  
 
-  end  //tag_comparison
-
-  // sequential process
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (~rst_ni) begin
       itlb_vpn_q <= '0;
       dtlb_vpn_q <= '0;
       tlb_update_asid_q <= '{default: 0};
-      tlb_update_vmid_q <= '{default: 0};
       shared_tlb_access_q <= '0;
       shared_tlb_vaddr_q <= '0;
       shared_tag_valid_q <= '0;
@@ -285,8 +173,8 @@ module cva6_shared_tlb #(
       i_req_q <= 0;
       shared_tag_valid <= '0;
     end else begin
-      itlb_vpn_q <= itlb_vaddr_i[CVA6Cfg.SV-1:12];
-      dtlb_vpn_q <= dtlb_vaddr_i[CVA6Cfg.SV-1:12];
+      itlb_vpn_q <= itlb_vaddr_i[SV-1:12];
+      dtlb_vpn_q <= dtlb_vaddr_i[SV-1:12];
       tlb_update_asid_q <= tlb_update_asid_d;
       shared_tlb_access_q <= shared_tlb_access_d;
       shared_tlb_vaddr_q <= shared_tlb_vaddr_d;
@@ -308,12 +196,12 @@ module cva6_shared_tlb #(
     tag_wr_en = '0;
     pte_wr_en = '0;
 
-    if (flush_i || flush_vvma_i || flush_gvma_i) begin
+    if (flush_i) begin
       shared_tag_valid_d = '0;
     end else if (shared_tlb_update_i.valid) begin
       for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
-        if (repl_way_oh_d[i]) begin
-          shared_tag_valid_d[shared_tlb_update_i.vpn[$clog2(CVA6Cfg.SharedTlbDepth)-1:0]][i] = 1'b1;
+        if (repl_way_oh_d[i]) begin // 替换独热码
+          shared_tag_valid_d[shared_tlb_update_i.vpn[$clog2(SharedTlbDepth)-1:0]][i] = 1'b1;
           tag_wr_en[i] = 1'b1;
           pte_wr_en[i] = 1'b1;
         end
@@ -324,36 +212,32 @@ module cva6_shared_tlb #(
   assign shared_tag_wr.asid = shared_tlb_update_i.asid;
   assign shared_tag_wr.vmid = shared_tlb_update_i.vmid;
   assign shared_tag_wr.is_page = shared_tlb_update_i.is_page;
-  assign shared_tag_wr.v_st_enbl = v_st_enbl[i_req_q][HYP_EXT*2:0];
+  assign shared_tag_wr.v_st_enbl = v_st_enbl[i_req_q];
 
   genvar z;
   generate
-    for (z = 0; z < CVA6Cfg.PtLevels; z++) begin : gen_shared_tag
-      assign shared_tag_wr.vpn[z] = shared_tlb_update_i.vpn[((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(z+1))-1:((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*z)];
+    for (z = 0; z < PtLevels; z++) begin : gen_shared_tag
+      assign shared_tag_wr.vpn[z] = shared_tlb_update_i.vpn[((VpnLen/PtLevels)*(z+1))-1:((VpnLen/PtLevels)*z)];
     end
-    if (CVA6Cfg.RVH) begin : gen_shared_tag_hyp
-      //THIS UPDATES THE EXTRA BITS OF VPN IN SV39x4
-      assign shared_tag_wr.vpn[CVA6Cfg.PtLevels][(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels)-1:0] = shared_tlb_update_i.vpn[CVA6Cfg.VpnLen-1: CVA6Cfg.VpnLen-(CVA6Cfg.VpnLen%CVA6Cfg.PtLevels)];
-    end
+
   endgenerate
 
 
-  assign tag_wr_addr = shared_tlb_update_i.vpn[$clog2(CVA6Cfg.SharedTlbDepth)-1:0];
+  assign tag_wr_addr = shared_tlb_update_i.vpn[$clog2(SharedTlbDepth)-1:0];
   assign tag_wr_data = shared_tag_wr;
 
-  assign pte_wr_addr = shared_tlb_update_i.vpn[$clog2(CVA6Cfg.SharedTlbDepth)-1:0];
+  assign pte_wr_addr = shared_tlb_update_i.vpn[$clog2(SharedTlbDepth)-1:0];
 
-  assign pte_wr_data[0] = shared_tlb_update_i.content[CVA6Cfg.XLEN-1:0];
-  assign pte_wr_data[1] = shared_tlb_update_i.g_content[CVA6Cfg.XLEN-1:0];
+  assign pte_wr_data[0] = shared_tlb_update_i.content[XLEN-1:0];
+  assign pte_wr_data[1] = shared_tlb_update_i.g_content[XLEN-1:0];
 
+  logic [SHARED_TLB_WAYS-1:0] out;
+  assign out[repl_way] = 1'b1;
 
-
-  assign way_valid = shared_tag_valid_q[shared_tlb_update_i.vpn[$clog2(
-      CVA6Cfg.SharedTlbDepth
-  )-1:0]];
+  assign way_valid = shared_tag_valid_q[shared_tlb_update_i.vpn[$clog2(SharedTlbDepth)-1:0]];
   assign repl_way = (all_ways_valid) ? rnd_way : inv_way;
   assign update_lfsr = shared_tlb_update_i.valid & all_ways_valid;
-  assign repl_way_oh_d = (shared_tlb_update_i.valid) ? shared_tlb_way_bin2oh(repl_way) : '0;
+  assign repl_way_oh_d = (shared_tlb_update_i.valid) ? out : '0;
 
   lzc #(
       .WIDTH(SHARED_TLB_WAYS)
@@ -386,10 +270,11 @@ module cva6_shared_tlb #(
   assign pte_addr = pte_wr_en ? pte_wr_addr : pte_rd_addr;
 
   for (genvar i = 0; i < SHARED_TLB_WAYS; i++) begin : gen_sram
+
       // Tag RAM
       sram #(
           .DATA_WIDTH($bits(shared_tag_t)),
-          .NUM_WORDS (CVA6Cfg.SharedTlbDepth)
+          .NUM_WORDS (SharedTlbDepth)
       ) tag_sram (
           .clk_i  (clk_i),
           .rst_ni (rst_ni),
@@ -407,8 +292,8 @@ module cva6_shared_tlb #(
 
         // PTE RAM
         sram #(
-            .DATA_WIDTH(CVA6Cfg.XLEN),
-            .NUM_WORDS (CVA6Cfg.SharedTlbDepth)
+            .DATA_WIDTH(XLEN),
+            .NUM_WORDS (SharedTlbDepth)
         ) pte_sram (
             .clk_i  (clk_i),
             .rst_ni (rst_ni),
@@ -422,5 +307,6 @@ module cva6_shared_tlb #(
             .rdata_o(pte_rd_data[i][a])
         );
         assign pte[i][a] = pte_cva6_t'(pte_rd_data[i][a]);
+
   end
 endmodule
