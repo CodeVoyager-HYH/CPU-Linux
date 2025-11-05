@@ -307,6 +307,5 @@ always_comb begin : itlb_dtlb_miss
             .rdata_o(pte_rd_data[i][a])
         );
         assign pte[i][a] = pte_cva6_t'(pte_rd_data[i][a]);
-
   end
 endmodule
