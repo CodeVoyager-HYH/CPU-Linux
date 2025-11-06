@@ -19,9 +19,7 @@ module pmp
 
     assign conf_addr_prev = (i == 0) ? '0 : conf_addr_i[i-1]; // 特殊情况，当PMP表项的第0个表项且字段为TOR，则表示0
 
-    pmp_entry #(
-      .CVA6Cfg(CVA6Cfg)
-    ) i_pmp_entry (
+    pmp_entry i_pmp_entry (
       .addr_i          (addr_i),
       .conf_addr_i     (conf_addr_i[i]),
       .conf_addr_prev_i(conf_addr_prev),

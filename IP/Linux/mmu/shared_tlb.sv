@@ -1,7 +1,9 @@
 module shared_tlb #(
-  parameters
+  parameter type pte_cva6_t = logic,
+  parameter type tlb_update_cva6_t = logic,
+  parameter int SHARED_TLB_WAYS = 2
 ) (
-  input   logic clk_n,
+  input   logic clk_i,
   input   logic rst_ni,
   input   logic flush_i,
 
@@ -13,7 +15,7 @@ module shared_tlb #(
   // 用于判断是哪一个tlb未命中
   input   logic                   dtlb_access_i,
   input   logic                   dtlb_hit_i,
-  input   logic [VLEN-1:0]        dtlb_va ddr_i,
+  input   logic [VLEN-1:0]        dtlb_vaddr_i,
 
   input   logic                   itlb_access_i,
   input   logic                   itlb_hit_i,
@@ -39,16 +41,66 @@ module shared_tlb #(
     logic [ASID_WIDTH-1:0] asid;
     logic [PtLevels-1:0][(VpnLen/PtLevels)-1:0] vpn;
     logic [PtLevels-2:0] is_page;
+    logic                v_st_enbl;
   } shared_tag_t;
+
+  shared_tag_t shared_tag_wr;
+  shared_tag_t [SHARED_TLB_WAYS-1:0] shared_tag_rd;
+  logic [SharedTlbDepth-1:0][SHARED_TLB_WAYS-1:0] shared_tag_valid_q, shared_tag_valid_d;
+  logic [               SHARED_TLB_WAYS-1:0] shared_tag_valid;
+  logic [               SHARED_TLB_WAYS-1:0] tag_wr_en;
+  logic [$clog2(SharedTlbDepth)-1:0] tag_wr_addr;
+  logic [           $bits(shared_tag_t)-1:0] tag_wr_data;
+  logic [               SHARED_TLB_WAYS-1:0] tag_rd_en;
+  logic [$clog2(SharedTlbDepth)-1:0] tag_rd_addr;
+  logic [           $bits(shared_tag_t)-1:0] tag_rd_data      [SHARED_TLB_WAYS-1:0];
+  logic [               SHARED_TLB_WAYS-1:0] tag_req;
+  logic [               SHARED_TLB_WAYS-1:0] tag_we;
+  logic [$clog2(SharedTlbDepth)-1:0] tag_addr;
+  logic [               SHARED_TLB_WAYS-1:0] pte_wr_en;
+  logic [$clog2(SharedTlbDepth)-1:0] pte_wr_addr;
+  logic [                  XLEN-1:0] pte_wr_data;
+  logic [               SHARED_TLB_WAYS-1:0] pte_rd_en;
+  logic [$clog2(SharedTlbDepth)-1:0] pte_rd_addr;
+  logic [                  XLEN-1:0] pte_rd_data      [SHARED_TLB_WAYS-1:0] ;
+  logic [               SHARED_TLB_WAYS-1:0] pte_req;
+  logic [               SHARED_TLB_WAYS-1:0] pte_we;
+  logic [$clog2(SharedTlbDepth)-1:0] pte_addr;
+  logic [PtLevels-1:0][(VpnLen/PtLevels)-1:0] vpn_d, vpn_q;
+  logic [SHARED_TLB_WAYS-1:0][PtLevels-1:0] vpn_match;
+  logic [SHARED_TLB_WAYS-1:0][PtLevels-1:0] page_match;
+  logic [SHARED_TLB_WAYS-1:0][PtLevels-1:0] level_match;
+  logic [SHARED_TLB_WAYS-1:0] match_asid;
+  logic [SHARED_TLB_WAYS-1:0] match_stage;
+  pte_cva6_t [SHARED_TLB_WAYS-1:0] pte;
+  logic [VLEN-1-12:0] itlb_vpn_q;
+  logic [VLEN-1-12:0] dtlb_vpn_q;
+  logic [ASID_WIDTH-1:0] tlb_update_asid_q, tlb_update_asid_d;
+  logic shared_tlb_access_q, shared_tlb_access_d;
+  logic shared_tlb_hit_d;
+  logic [VLEN-1:0] shared_tlb_vaddr_q, shared_tlb_vaddr_d;
+  logic itlb_req_d, itlb_req_q;
+  logic dtlb_req_d, dtlb_req_q;
+  int i_req_d, i_req_q;
+  logic [1:0][2:0] v_st_enbl;
+
+  logic [SHARED_TLB_WAYS-1:0] way_valid;
+  logic update_lfsr;  
+  logic [$clog2(SHARED_TLB_WAYS)-1:0] inv_way;  
+  logic [$clog2(SHARED_TLB_WAYS)-1:0] rnd_way;  
+  logic [$clog2(SHARED_TLB_WAYS)-1:0] repl_way; 
+  logic [SHARED_TLB_WAYS-1:0] repl_way_oh_d;  
+  logic all_ways_valid;  
+
 
   assign shared_tlb_access_o = shared_tlb_access_q;
   assign shared_tlb_hit_o = shared_tlb_hit_d;
   assign shared_tlb_vaddr_o = shared_tlb_vaddr_q;
   assign itlb_req_o = itlb_req_q;
-  assign v_st_enbl = { s_st_enbl_i,  s_ld_st_enbl_i};
+  assign v_st_enbl = {{2'b0, s_st_enbl_i}, {2'b0, s_ld_st_enbl_i}};
 
   generate  // 匹配
-    for(genvar i = 0; i < SHARED_TLB_WAY; i++) begin // 遍历所有路
+    for(genvar i = 0; i < SHARED_TLB_WAYS; i++) begin // 遍历所有路
       for(genvar x = 0; x < PtLevels; x++) begin // 遍历所有页表等级
         assign page_match[i][x] = (x==0) ? 1 : 
                                           (shared_tag_rd[i].is_page[PtLevels-1-x]);
@@ -85,7 +137,6 @@ always_comb begin : itlb_dtlb_miss
     dtlb_req_d          = 1'b0;
 
     tlb_update_asid_d   = tlb_update_asid_q;
-    tlb_update_vmid_d   = tlb_update_vmid_q;
 
     shared_tlb_access_d = '0;
     shared_tlb_vaddr_d  = shared_tlb_vaddr_q;
@@ -118,7 +169,6 @@ always_comb begin : itlb_dtlb_miss
       dtlb_miss_o         = shared_tlb_miss_i;
       dtlb_req_d          = 1'b1;
       tlb_update_asid_d   = dtlb_asid_i;
-      tlb_update_vmid_d   = lu_vmid_i;
 
       shared_tlb_access_d = '1;
       shared_tlb_vaddr_d  = dtlb_vaddr_i;
@@ -135,7 +185,7 @@ always_comb begin : itlb_dtlb_miss
         match_asid[i] = (((tlb_update_asid_q == shared_tag_rd[i].asid) || pte[i][0].g) && v_st_enbl[i_req_q][0]) || !v_st_enbl[i_req_q][0];
         match_stage[i] = shared_tag_rd[i].v_st_enbl == v_st_enbl[i_req_q];
 
-        if (shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_stage[i]) begin
+        if (shared_tag_valid[i] && match_asid[i] && match_stage[i]) begin
           if (|level_match[i]) begin
             shared_tlb_hit_d = 1'b1;
             if (itlb_req_q) begin
@@ -210,7 +260,6 @@ always_comb begin : itlb_dtlb_miss
   end  //update_flush
 
   assign shared_tag_wr.asid = shared_tlb_update_i.asid;
-  assign shared_tag_wr.vmid = shared_tlb_update_i.vmid;
   assign shared_tag_wr.is_page = shared_tlb_update_i.is_page;
   assign shared_tag_wr.v_st_enbl = v_st_enbl[i_req_q];
 
@@ -228,8 +277,7 @@ always_comb begin : itlb_dtlb_miss
 
   assign pte_wr_addr = shared_tlb_update_i.vpn[$clog2(SharedTlbDepth)-1:0];
 
-  assign pte_wr_data[0] = shared_tlb_update_i.content[XLEN-1:0];
-  assign pte_wr_data[1] = shared_tlb_update_i.g_content[XLEN-1:0];
+  assign pte_wr_data = shared_tlb_update_i.content[XLEN-1:0];
 
   logic [SHARED_TLB_WAYS-1:0] out;
   assign out[repl_way] = 1'b1;
@@ -301,11 +349,11 @@ always_comb begin : itlb_dtlb_miss
             .we_i   (pte_we[i]),
             .addr_i (pte_addr),
             .wuser_i('0),
-            .wdata_i(pte_wr_data[a]),
+            .wdata_i(pte_wr_data),
             .be_i   ('1),
             .ruser_o(),
-            .rdata_o(pte_rd_data[i][a])
+            .rdata_o(pte_rd_data[i][0])
         );
-        assign pte[i][a] = pte_cva6_t'(pte_rd_data[i][a]);
+        assign pte[i] = pte_cva6_t'(pte_rd_data[i]);
   end
 endmodule

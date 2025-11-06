@@ -32,6 +32,7 @@ module store_unit
     // 来自MMU/DTLB的输入
   input   logic [55:0]              paddr_i,                // 翻译后的物理地址
   input   exception_t               ex_i,                   // 外部异常（如地址翻译失败）
+  output  exception_t               ex_o,
   input   logic                     dtlb_hit_i,             // DTLB命中信号
 
   // 与Load单元的地址冲突检测

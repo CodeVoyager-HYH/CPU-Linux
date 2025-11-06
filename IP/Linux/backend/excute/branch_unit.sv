@@ -9,7 +9,7 @@ module branch_unit
   input   logic clk_i,
   input   logic rst_ni,
 
-  input   logic [VLEN-1:0]  pc_i,
+  input   logic [VLEN-1:0]      pc_i,
   input   fu_data_t             fu_data_i,
   input   logic                 branch_valid_i,
   input   branchpredict_sbe_t   branch_predict_i,   // 分支预测结果

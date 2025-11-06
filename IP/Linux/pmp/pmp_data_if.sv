@@ -2,7 +2,6 @@ module pmp_data_if
   import config_pkg::*;
   import mmu_pkg::*;
 #(
-    parameter config_pkg::cva6_cfg_t CVA6Cfg       = config_pkg::cva6_cfg_empty,
     parameter type                   icache_areq_t = logic,
     parameter type                   exception_t   = logic
 ) (
@@ -22,9 +21,7 @@ module pmp_data_if
     output exception_t lsu_exception_o,  // address translation threw an exception
     // General control signals
     input riscv::priv_lvl_t priv_lvl_i,
-    input logic v_i,
     input riscv::priv_lvl_t ld_st_priv_lvl_i,
-    input logic ld_st_v_i,
     // PMP
     input riscv::pmpcfg_t [avoid_neg(NrPMPEntries-1):0] pmpcfg_i,
     input logic [avoid_neg(NrPMPEntries-1):0][PLEN-3:0] pmpaddr_i
@@ -47,11 +44,9 @@ module pmp_data_if
   //-----------------------
   // Instruction Interface
   //-----------------------
-y
   assign match_any_execute_region = config_pkg::is_inside_execute_regions(
-      CVA6Cfg, {{64 - PLEN{1'b0}}, icache_areq_i.fetch_paddr}
+        {{64 - PLEN{1'b0}}, icache_areq_i.fetch_paddr}
   );
-
 
   always_comb begin : instr_interface
     icache_areq_o.fetch_valid     = icache_areq_i.fetch_valid;

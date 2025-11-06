@@ -2,7 +2,6 @@ module lsu
   import config_pkg::*;
   import mmu_pkg::*;
 #(
-  parameter type fu_data_t      = logic,
   parameter type dcache_req_i_t = logic,    
   parameter type dcache_req_o_t = logic,   
   parameter type exception_t    = logic,     
@@ -20,6 +19,8 @@ module lsu
   input   logic     flush_i,
   input   logic     stall_st_pending_i,
   input   logic     amo_valid_commit_i,  
+  input   logic     enable_translation_i,
+  input   logic     en_ld_st_translation_i,
   output  logic     no_st_pending_o,
 
   input   fu_data_t                 fu_data_i,
@@ -27,15 +28,20 @@ module lsu
   output  logic                     lsu_ready_o,
   
   // 输出结果与异常
-  output  logic                     lsu_result_valid_o,
-  output  logic [         XLEN-1:0] lsu_result_o,
-  output  logic [ POINTER_SIZE-1:0] lsu_pointer_o,
+  output  logic                     load_valid_o,
+  output  logic [         XLEN-1:0] load_result_o,
+  output  logic [ POINTER_SIZE-1:0] load_trans_id_o,
   output  exception_t               load_exception_o, 
-
+  
+  output  logic [POINTER_SIZE-1:0]  store_trans_id_o,
+  output  logic [XLEN-1:0]          store_result_o,
+  output  logic                     store_valid_o,
+  output  exception_t               store_exception_o,
+  
   // 提交
   input   logic                     commit_i,             
   output  logic                     commit_ready_o,     
-  input   logic [ POINTER_SIZE-1:0] commit_pointer_i,  
+  input   logic [ POINTER_SIZE-1:0] commit_tran_id_i,  
 
   // 与数据缓存交互
   input   icache_arsp_t             icache_areq_i,
@@ -47,9 +53,12 @@ module lsu
   input   priv_lvl_t                ld_st_priv_lvl_i,     // 加载/存储的特权级
   input   logic                     sum_i,                // 监督模式用户内存访问使能（SUM）
   input   logic                     mxr_i,                // 可执行内存可读（MXR）
-  input   logic [XLEN-1:0]          satp_i,               // SATP寄存器的PPN（页表基址）
+  input  logic  [PPNW-1:0]          satp_ppn_i,
+  input   logic [ASID_WIDTH-1:0]    asid_i,
+  
     // TLB冲刷信号
   input   logic [ASID_WIDTH-1:0]    asid_to_be_flushed_i, // 待冲刷的ASID,避免不必要的全冲刷
+  input   logic [VLEN-1:0]          vaddr_to_be_flushed_i,
   input   logic                     flush_tlb_i,          // TLB全冲刷
   output  logic                     itlb_miss_o,          // ITLB未命中（性能计数）
   output  logic                     dtlb_miss_o,          // DTLB未命中（性能计数）
@@ -105,8 +114,7 @@ module lsu
   logic translation_req, cva6_translation_req, acc_translation_req;  // 总翻译请求
   logic translation_valid, cva6_translation_valid;                  // 翻译有效
   logic [VLEN-1:0] mmu_vaddr, cva6_mmu_vaddr, acc_mmu_vaddr; // MMU虚拟地址
-  logic [PLEN-1:0] mmu_paddr, cva6_mmu_paddr, acc_mmu_paddr, lsu_paddr; // 物理地址
-  logic [31:0] mmu_tinst;                      // MMU陷阱指令
+  logic [PLEN-1:0] mmu_paddr, cva6_mmu_paddr, acc_mmu_paddr, lsu_paddr; // 物理地址            // MMU陷阱指令
   logic mmu_hs_ld_st_inst, mmu_hlvx_inst;      // MMU虚拟化标记
   input logic en_ld_st_translation_i,
   
@@ -146,77 +154,66 @@ module lsu
   //  MMU 实例化
   //============================
     cva6_mmu #(
-        .CVA6Cfg       (CVA6Cfg),       // CVA6配置
         .exception_t   (exception_t),   // 异常类型
         .icache_areq_t (icache_areq_t), // ICache请求类型
         .icache_arsp_t (icache_arsp_t), // ICache响应类型
         .icache_dreq_t (icache_dreq_t), // ICache数据请求类型
         .icache_drsp_t (icache_drsp_t), // ICache数据响应类型
         .dcache_req_i_t(dcache_req_i_t),// DCache请求类型
-        .dcache_req_o_t(dcache_req_o_t),// DCache响应类型
-        .HYP_EXT       (HYP_EXT)        // 是否支持Hypervisor
+        .dcache_req_o_t(dcache_req_o_t) // DCache响应类型
     ) i_cva6_mmu (
-        .clk_i(clk_i),
-        .rst_ni(rst_ni),
-        .flush_i(flush_i),
+        .clk_i                  (clk_i),
+        .rst_ni                 (rst_ni),
+        .flush_i                (flush_i),
         // 虚拟内存使能
-        .enable_translation_i(enable_translation_i),
-        .enable_g_translation_i(enable_g_translation_i),
-        .en_ld_st_translation_i(en_ld_st_translation_i),
-        .en_ld_st_g_translation_i(en_ld_st_g_translation_i),
+        .enable_translation_i   (enable_translation_i),
+        .en_ld_st_translation_i (en_ld_st_translation_i),
+
         // ICache接口
-        .icache_areq_i(icache_areq_i),
-        .icache_areq_o(pmp_icache_areq_i),  // MMU输出给PMP的ICache请求
-        // 未对齐异常旁路
-        .misaligned_ex_i(misaligned_exception),
-        // LSU请求
-        .lsu_req_i(translation_req),        // LSU翻译请求
-        .lsu_vaddr_i(mmu_vaddr),           // LSU虚拟地址
-        .lsu_tinst_i(mmu_tinst),           // LSU陷阱指令
-        .lsu_is_store_i(st_translation_req),// 是否为存储操作
-        .csr_hs_ld_st_inst_o(csr_hs_ld_st_inst_o), // HS标记输出
+        .icache_areq_i          (icache_areq_i),
+        .icache_areq_o          (pmp_icache_areq_i),  // MMU输出给PMP的ICache请求
+
+        // 未对齐异常旁路 LSU请求
+        .misaligned_ex_i        (misaligned_exception),
+        .lsu_req_i              (translation_req),        // LSU翻译请求
+        .lsu_vaddr_i            (mmu_vaddr),           // LSU虚拟地址
+        .lsu_is_store_i         (st_translation_req),// 是否为存储操作
+
         // DTLB结果（同周期返回）
-        .lsu_dtlb_hit_o(dtlb_hit),         // DTLB命中
-        .lsu_dtlb_ppn_o(dtlb_ppn),         // DTLB PPN
+        .lsu_dtlb_hit_o         (dtlb_hit),         // DTLB命中
+        .lsu_dtlb_ppn_o         (dtlb_ppn),         // DTLB PPN
+        
         // MMU翻译结果（多周期后返回）
-        .lsu_valid_o(pmp_translation_valid),// 翻译有效（输出给PMP）
-        .lsu_paddr_o(lsu_paddr),           // 物理地址（输出给PMP）
-        .lsu_exception_o(pmp_exception),   // MMU异常（输出给PMP）
-        // 特权级与虚拟化状态
-        .priv_lvl_i(priv_lvl_i),
-        .v_i(v_i),
-        .ld_st_priv_lvl_i(ld_st_priv_lvl_i),
-        .ld_st_v_i(ld_st_v_i),
-        .sum_i(sum_i),
-        .vs_sum_i(vs_sum_i),
-        .mxr_i(mxr_i),
-        .vmxr_i(vmxr_i),
-        // 虚拟化标记
-        .hlvx_inst_i(mmu_hlvx_inst),
-        .hs_ld_st_inst_i(mmu_hs_ld_st_inst),
+        .lsu_valid_o            (pmp_translation_valid),// 翻译有效（输出给PMP）
+        .lsu_paddr_o            (lsu_paddr),           // 物理地址（输出给PMP）
+        .lsu_exception_o        (pmp_exception),   // MMU异常（输出给PMP）
+        
+        // 特权级
+        .priv_lvl_i             (priv_lvl_i),
+        .ld_st_priv_lvl_i       (ld_st_priv_lvl_i),
+        .sum_i                  (sum_i),
+        .mxr_i                  (mxr_i),
+
         // 页表与TLB配置
-        .satp_ppn_i(satp_ppn_i),
-        .vsatp_ppn_i(vsatp_ppn_i),
-        .hgatp_ppn_i(hgatp_ppn_i),
-        .asid_i(asid_i),
-        .vs_asid_i(vs_asid_i),
-        .asid_to_be_flushed_i(asid_to_be_flushed_i),
-        .vmid_i(vmid_i),
-        .vmid_to_be_flushed_i(vmid_to_be_flushed_i),
-        .vaddr_to_be_flushed_i(vaddr_to_be_flushed_i),
-        .gpaddr_to_be_flushed_i(gpaddr_to_be_flushed_i),
-        .flush_tlb_i(flush_tlb_i),
-        .flush_tlb_vvma_i(flush_tlb_vvma_i),
-        .flush_tlb_gvma_i(flush_tlb_gvma_i),
+        .satp_ppn_i             (satp_ppn_i),
+
+        .asid_i                 (asid_i),
+        .asid_to_be_flushed_i   (asid_to_be_flushed_i),
+        .vaddr_to_be_flushed_i  (vaddr_to_be_flushed_i),
+
+        .flush_tlb_i            (flush_tlb_i),
+
         // 性能计数
-        .itlb_miss_o(itlb_miss_o),
-        .dtlb_miss_o(dtlb_miss_o),
+        .itlb_miss_o            (itlb_miss_o),
+        .dtlb_miss_o            (dtlb_miss_o),
+        
         // DCache接口（用于页表访问）
-        .req_port_i(dcache_req_ports_i[0]),
-        .req_port_o(dcache_req_ports_o[0]),
+        .req_port_i             (dcache_req_ports_i[0]),
+        .req_port_o             (dcache_req_ports_o[0]),
+        
         // PMP配置（MMU内部可能需PMP检查页表访问）
-        .pmpcfg_i(pmpcfg_i),
-        .pmpaddr_i(pmpaddr_i)
+        .pmpcfg_i               (pmpcfg_i),
+        .pmpaddr_i              (pmpaddr_i)
     );
 
 
@@ -242,9 +239,7 @@ module lsu
       .lsu_paddr_o         (mmu_paddr),
       .lsu_exception_o     (mmu_exception),
       .priv_lvl_i          (priv_lvl_i),
-      .v_i                 (v_i),
       .ld_st_priv_lvl_i    (ld_st_priv_lvl_i),
-      .ld_st_v_i           (ld_st_v_i),
       .pmpcfg_i            (pmpcfg_i),
       .pmpaddr_i           (pmpaddr_i)
   );
@@ -269,7 +264,6 @@ module lsu
   // Store Buffer 实例化
   //=======================
     store_unit #(
-      .CVA6Cfg(CVA6Cfg),
       .dcache_req_i_t(dcache_req_i_t),
       .dcache_req_o_t(dcache_req_o_t),
       .exception_t(exception_t),
@@ -277,38 +271,37 @@ module lsu
   ) i_store_unit (
       .clk_i,
       .rst_ni,
+
       .flush_i,
       .stall_st_pending_i,
       .no_st_pending_o(no_st_pending_o),
       .store_buffer_empty_o(store_buffer_empty),  // 存储缓冲区空（输出给加载单元）
+      .pop_st_o  (pop_st),              // 存储指令弹出（通知Issue阶段）
 
       .valid_i   (st_valid_i),          // 存储指令有效（来自LSU顶层）
       .lsu_ctrl_i(lsu_ctrl),            // LSU控制信号（地址、操作类型等）
-      .pop_st_o  (pop_st),              // 存储指令弹出（通知Issue阶段）
+      
       .commit_i  (commit_i),            // 提交信号（确认存储有效）
       .commit_ready_o(commit_ready_o),  // 提交就绪（存储缓冲区可接收）
       .amo_valid_commit_i(amo_valid_commit_i),  // AMO提交有效
 
       .valid_o              (st_valid),  // 存储结果有效（输出给流水线寄存器）
-      .trans_id_o           (st_trans_id),  // 存储事务ID
-      .result_o             (st_result),  // 存储结果（无意义，传递输入）
-      .ex_o                 (st_ex),     // 存储异常（输出给流水线寄存器）
-      // MMU接口
       .translation_req_o    (cva6_st_translation_req),  // 存储翻译请求（给MMU）
+      .pointer_o            (st_trans_id),  // 存储事务ID
       .vaddr_o              (st_vaddr),  // 存储虚拟地址（给MMU）
-      .rvfi_mem_paddr_o     (rvfi_mem_paddr_o),  // RVFI物理地址
-      .tinst_o              (st_tinst),  // 存储陷阱指令（给MMU）
-      .hs_ld_st_inst_o      (st_hs_ld_st_inst),  // 存储HS标记（给MMU）
-      .hlvx_inst_o          (st_hlvx_inst),  // 存储HLVX标记（给MMU）
+
       .paddr_i              (cva6_mmu_paddr),  // MMU输出的物理地址
       .ex_i                 (cva6_mmu_exception),  // MMU异常
       .dtlb_hit_i           (cva6_dtlb_hit),  // DTLB命中
-      // 加载单元接口（地址冲突检测）
+
       .page_offset_i        (page_offset),  // 加载页内偏移（来自加载单元）
       .page_offset_matches_o(page_offset_matches),  // 偏移匹配（冲突标记）
-      // AMO接口
+      
       .amo_req_o            (amo_req_o),  // AMO请求（给DCache）
       .amo_resp_i           (amo_resp_i),  // AMO响应（来自DCache）
+
+      .ex_o                 (st_ex),     // 存储异常（输出给流水线寄存器）
+      .result_o             (st_result),
       // DCache接口
       .req_port_i           (dcache_req_ports_i[2]),
       .req_port_o           (dcache_req_ports_o[2])
@@ -335,21 +328,21 @@ module lsu
       .trans_id_o           (ld_trans_id),
       .result_o             (ld_result),
       .ex_o                 (ld_ex),
+      
       // MMU port
-      .translation_req_o    (ld_translation_req),
+      .mmu_vaddr_valid_o    (ld_translation_req),
       .vaddr_o              (ld_vaddr),
-      .tinst_o              (ld_tinst),
-      .hs_ld_st_inst_o      (ld_hs_ld_st_inst),
-      .hlvx_inst_o          (ld_hlvx_inst),
       .paddr_i              (cva6_mmu_paddr),
       .ex_i                 (cva6_mmu_exception),
       .dtlb_hit_i           (cva6_dtlb_hit),
       .dtlb_ppn_i           (cva6_dtlb_ppn),
+      
       // to store unit
       .page_offset_o        (page_offset),
       .page_offset_matches_i(page_offset_matches),
       .store_buffer_empty_i (store_buffer_empty),
-      .commit_tran_id_i,
+      .commit_pointer_i     (commit_tran_id_i),
+
       // to memory arbiter
       .req_port_i           (dcache_req_ports_i[1]),
       .req_port_o           (dcache_req_ports_o[1]),
@@ -387,9 +380,7 @@ module lsu
     st_valid_i           = 1'b0;
     cva6_translation_req = 1'b0;
     cva6_mmu_vaddr       = {VLEN{1'b0}};
-    mmu_tinst            = {32{1'b0}};
-    mmu_hs_ld_st_inst    = 1'b0;
-    mmu_hlvx_inst        = 1'b0;
+
 
     // 根据LSU控制信号的功能单元（FU）区分加载/存储
     unique case (lsu_ctrl.fu)
@@ -518,8 +509,8 @@ module lsu
       .pop_ld_i       (pop_ld),           // 加载弹出
       .pop_st_i       (pop_st),           // 存储弹出
 
-      .lsu_ctrl_o(lsu_ctrl_byp),          // 缓冲后的LSU控制信号
-      .ready_o   (lsu_ready_o)            // LSU就绪（队列未满）
+      .lsu_ctrl_o     (lsu_ctrl_byp),          // 缓冲后的LSU控制信号
+      .ready_o        (lsu_ready_o)            // LSU就绪（队列未满）
   );
 
 endmodule

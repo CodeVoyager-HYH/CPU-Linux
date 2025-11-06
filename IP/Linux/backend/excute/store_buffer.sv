@@ -29,7 +29,7 @@ module store_buffer
   input   logic [    XLEN-1:0]  data_i,  
   input   logic [(XLEN/8)-1:0]  be_i,  
   input   logic [         1:0]  data_size_i,  
-
+  output  logic [    XLEN-1:0]  result_o,
   // D$ interface
   input   dcache_req_o_t        req_port_i,
   output  dcache_req_i_t        req_port_o
@@ -102,7 +102,7 @@ module store_buffer
   assign req_port_o.data_we  = 1'b1;  
   assign req_port_o.tag_valid = 1'b0;
   assign req_port_o.data_id = '0;
-
+  assign result_o = lsu_ctrl_i.data;
   // 缓存地址拆分：按DCache格式拆分索引（Index）和标记（Tag）
   assign req_port_o.address_index = commit_queue_q[commit_read_pointer_q].address[DCACHE_INDEX_WIDTH-1:0];
   assign req_port_o.address_tag   = commit_queue_q[commit_read_pointer_q].address[DCACHE_TAG_WIDTH + DCACHE_INDEX_WIDTH - 1 : DCACHE_INDEX_WIDTH];

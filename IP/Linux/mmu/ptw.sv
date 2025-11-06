@@ -1,408 +1,331 @@
-// 目前想法，通过仲裁器判断需要优先哪一个执行，然后通过PTE cache判断是否命中
-// 如果没有命中则执行正常的分页操作, 支持sv39
-
-module ptw 
-  import mmu_pkg::*;
-#() 
-(
-  input logic clk_i,
-  input logic rst_ni
-
-  // iTLB 交互
-  input   tlb_ptw_comm_t itlb_ptw_comm_i, 
-  output  ptw_tlb_comm_t  ptw_itlb_comm_o,
-
-  // dTLB 交互
-  input   tlb_ptw_comm_t  dtlb_ptw_comm_i,
-  output  ptw_tlb_comm_t  ptw_dtlb_comm_o,
-
-  // 与内存交互
-  input   dmem_ptw_comm_t dmem_ptw_comm_i,
-  output  ptw_dmem_comm_t ptw_dmem_comm_o,
-
-  // csr 交互
-  input   csr_ptw_comm_t  csr_ptw_comm_i,  // satp,flush,mstatus
-
-  // 性能计数器
-  output logic            pmu_ptw_hit_o,
-  output logic            pmu_ptw_miss_o
+module ptw
+  import ariane_pkg::*;  // 导入CVA6处理器的全局定义（如类型、常量）
+#(
+    parameter type pte_cva6_t = logic,  // 页表项（PTE）类型（由外部定义，如包含权限位、物理页号等）
+    parameter type tlb_update_cva6_t = logic,  // TLB更新信息类型（用于通知TLB更新缓存）
+    parameter type dcache_req_i_t = logic,  // 数据缓存请求输入类型
+    parameter type dcache_req_o_t = logic  // 数据缓存请求输出类型
+) (
+    // 时钟与复位
+    input   logic clk_i,  // 时钟信号
+    input   logic rst_ni,  // 异步复位（低电平有效）
+    input   logic flush_i,  // 刷新信号（清空PTW状态，处理推测执行带来的不一致）
+    
+    // PTW状态输出
+    output  logic                               ptw_active_o,           // PTW正在进行页表遍历（活跃状态）
+    output  logic                               walking_instr_o,        // PTW因ITLB未命中而遍历（区分指令/数据遍历）
+    output  logic                               ptw_error_o,            // 页表遍历出错（如无效PTE）
+    output  logic                               ptw_access_exception_o, // PMP（物理内存保护）访问异常
+    
+    // 虚拟地址转换使能信号
+    input   logic                               enable_translation_i,   // 使能S地址转换（来自CSR）
+    input   logic                               en_ld_st_translation_i, // 使能加载/存储的S/VS-stage转换
+    
+    input   logic                               lsu_is_store_i,         // 本次遍历是否由存储操作触发
+    
+    // 数据缓存接口（用于访问内存中的页表）
+    input   dcache_req_o_t                      req_port_i,             // 缓存返回的响应（如页表项数据）
+    output  dcache_req_i_t                      req_port_o,             // 向缓存发送的请求（如读取页表项）
+    
+    // TLB更新输出（遍历完成后通知TLB更新缓存）
+    output  tlb_update_cva6_t                   shared_tlb_update_o,
+    output  logic [VLEN-1:0]                    update_vaddr_o,         // 需要更新TLB的虚拟地址
+    
+    // 地址空间标识（区分不同进程/虚拟机）
+    input   logic [ASID_WIDTH-1:0]              asid_i,                 // 当前ASID（地址空间ID）
+    
+    // TLB未命中信息（来自共享TLB控制器）
+    input   logic                               shared_tlb_access_i,    // 共享TLB有访问请求
+    input   logic                               shared_tlb_hit_i,       // 共享TLB命中
+    input   logic [VLEN-1:0]                    shared_tlb_vaddr_i,     // TLB未命中的虚拟地址
+    
+    input   logic                               itlb_req_i,             // 本次遍历是否由ITLB（指令TLB）未命中触发
+    
+    // 页表基址（来自CSR寄存器）
+    input   logic [PPNW-1:0]                    satp_ppn_i,             // satp寄存器的PPN（物理页号，S-stage页表基址）
+    input   logic                               mxr_i,                  // 允许读取可执行页（Make eXecutable Readable）
+    
+    // 性能计数
+    output  logic                               shared_tlb_miss_o,      // 共享TLB未命中计数
+    
+    // PMP（物理内存保护）配置
+    input   pmpcfg_t [NrPMPEntries-1:0]         pmpcfg_i,               // PMP配置寄存器
+    input   logic [NrPMPEntries-1:0][PLEN-3:0]  pmpaddr_i,              // PMP地址寄存器
+    output  logic [PLEN-1:0]                    bad_paddr_o             // 访问出错的物理地址（用于异常）
 );
 
+  // FSM
+  enum logic [2:0] {
+    IDLE,                   // 空闲（无页表遍历请求）
+    WAIT_GRANT,             // 等待缓存授权（发送页表读取请求后，等待缓存允许）
+    PTE_LOOKUP,             // 解析页表项（检查PTE有效性、权限等）
+    WAIT_RVALID,            // 等待缓存数据有效（读取页表项时，等待数据返回）
+    PROPAGATE_ERROR,        // 传播页表错误（如无效PTE）
+    PROPAGATE_ACCESS_ERROR, // 传播PMP访问错误
+    LATENCY                 // 延迟状态（用于时序对齐）
+  } state_q, state_d;  
+  
+  logic [PtLevels-2:0] misaligned_page;
+  logic shared_tlb_update_valid;
+  logic [PtLevels-2:0] ptw_lvl_n, ptw_lvl_q;
+  logic data_rvalid_q;
+  logic [XLEN-1:0] data_rdata_q;
 
-  // FSM 
-  typedef enum logic [2:0] {
-    S_READY,    // 空闲，等待TLB请求
-    S_REQ,      // 生成并发送访存请求
-    S_WAIT,     // 等待内存返回PTE
-    S_DONE,     // 解析页表完成，返回给TLB
-    S_ERROR     // 页表非法、访问错误等异常
-  } ptw_state;
-  ptw_state current_state, next_state;
+  pte_cva6_t pte;
+  assign pte = pte_cva6_t'(data_rdata_q);
+  logic is_instr_ptw_q, is_instr_ptw_n;
+  logic global_mapping_q, global_mapping_n;
+  logic tag_valid_n, tag_valid_q;
+  logic [ASID_WIDTH-1:0] tlb_update_asid_q, tlb_update_asid_n;
+  logic [VLEN-1:0] vaddr_q, vaddr_n;
+  logic [PtLevels-2:0][(VpnLen/PtLevels)-1:0] vaddr_lvl;
+  logic [PLEN-1:0] ptw_pptr_q, ptw_pptr_n;
 
-  localparam [4:0] M_XRD = 5'b00000;
-  localparam [3:0] MT_D = 4'b0011;
+  // 输出需要更新TLB的虚拟地址
+  assign update_vaddr_o = vaddr_q;
+  // PTW活跃状态
+  assign ptw_active_o = (state_q != IDLE);
+  // 是否为指令遍历（由ITLB未命中触发）
+  assign walking_instr_o = is_instr_ptw_q;
+  // 缓存地址映射（将物理指针转换为缓存的索引和标签）
+  assign req_port_o.address_index = ptw_pptr_q[DCACHE_INDEX_WIDTH-1:0];  // 缓存索引（物理地址低位）
+  assign req_port_o.address_tag   = ptw_pptr_q[DCACHE_INDEX_WIDTH+DCACHE_TAG_WIDTH-1:DCACHE_INDEX_WIDTH];  // 缓存标签（物理地址高位）
+  assign req_port_o.kill_req      = '0;  // 不取消请求
+  assign req_port_o.data_wdata    = '0;  // PTW只读取页表，不写入
+  assign req_port_o.data_id       = '0;  // 单请求，无需ID
 
-  logic unsigned [$clog2(LEVELS)-1:0] count_d, count_q;
-  logic unsigned [$clog2(LEVELS):0] count;
+  // 页表级别和地址映射关系
+  genvar z, w;
+  generate
+    // 遍历页表级别（z：0到页表级数-2）
+    for (z = 0; z < PtLevels - 1; z++) begin
+      // 检查超级页是否对齐：若当前级别>0，且PPN的低i位非0，则为未对齐超级页（抛出异常）
+      assign misaligned_page[z] = (ptw_lvl_q[0] == (z)) && (pte.ppn[(VpnLen/PtLevels)*(PtLevels-1-z)-1:0] != '0);
 
-  ptw_tlb_comm_t ptw_tlb_comm; 
-  tlb_ptw_comm_t tlb_ptw_comm; 
+      // 提取各级页表的VPN（虚拟页号）部分（用于生成下一级页表地址）
+      assign vaddr_lvl[z] = vaddr_q[12+((VpnLen/PtLevels)*(PtLevels-z-1))-1:12+((VpnLen/PtLevels)*(PtLevels-z-2))];
+    end
+  endgenerate
 
-  logic ptw_ready;
-  tlb_ptw_req_t r_req;
-  pte_t r_pte;
-  pte_t pte;
-  pte_t pte_wdata;
+  // 更新TLB
+  always_comb begin : tlb_update
+    shared_tlb_update_o.valid = shared_tlb_update_valid;  // TLB更新有效标志
 
-  logic [PAGE_LVL_BITS-1:0] vpn_req [LEVELS-1:0];
-  logic [PAGE_LVL_BITS-1:0] vpn_idx;
-  logic [SIZE_VADDR:0] pte_addr;
-  logic invalid_pte;
-  logic valid_pte_lvl [LEVELS-1:0];
-  logic is_pte_leaf, is_pte_table;
-  logic is_pte_ur, is_pte_uw, is_pte_ux;
-  logic is_pte_sr, is_pte_sw, is_pte_sx;
+    // 设置页大小标志（根据遍历的页表级别，区分4K/2M/1G页）
+    for (int unsigned x = 0; x < PtLevels - 1; x++) begin
+      shared_tlb_update_o.is_page[x] = (ptw_lvl_q[0] == x) ;  // 找到需要更新的页表大小，0 = 4k， 1 = 2M， 2 = 1G
+    end
 
-  logic [1:0] prv_req;
-  logic perm_ok;
+    // 设置TLB更新的页表项内容（含全局映射标志）
+    shared_tlb_update_o.content   = (pte | (global_mapping_q << 5)); 
+    // 设置TLB更新的ASID
+    shared_tlb_update_o.asid = tlb_update_asid_q;
+    shared_tlb_update_o.vpn = vaddr_q[12+VpnLen-1:12];  // 虚拟页号（去掉页内偏移）
 
-  logic resp_err, resp_val;
-  logic [63:0] r_resp_ppn;
-  logic [PPN_SIZE-1:0] resp_ppn_lvl [LEVELS-1:0];
-  logic [PPN_SIZE-1:0] resp_ppn;
+    // 错误地址输出（用于异常）
+    bad_paddr_o = ptw_access_exception_o ? ptw_pptr_q : 'b0;
+  end
 
-  logic pte_cache_hit;
-  logic [PPN_SIZE-1:0] pte_cache_data;
-
-  //=================
-  // 仲裁器
-  //=================
-  ptw_tlb_comm_t ptw_tlb_comm; 
-  tlb_ptw_comm_t tlb_ptw_comm; 
-  ptw_arb i_ptw_arb (
-    .clk_i,
-    .rst_ni,
-
-    .itlb_ptw_comm_i  (itlb_ptw_comm_i),
-    .dtlb_ptw_comm_i  (dtlb_ptw_comm_i),
-    .ptw_itlb_comm_o  (ptw_itlb_comm_o),
-    .ptw_dtlb_comm_o  (ptw_dtlb_comm_o),
-
-    .ptw_tlb_comm_i   (ptw_tlb_comm),
-    .tlb_ptw_comm_o   (tlb_ptw_comm)
+  logic allow_access;
+  pmp i_pmp_ptw (
+    .addr_i       (ptw_pptr_q),
+    .priv_lvl_i   (riscv::PRIV_LVL_S),
+    .access_type_i(riscv::ACCESS_READ),
+    .conf_addr_i  (pmpaddr_i),
+    .conf_i       (pmpcfg_i),
+    .allow_o      (allow_access)
   );
 
-  //==================
-  // 虚拟地址计算
-  //==================
-  genvar lvl;
-  generate
-      for (lvl = 0; lvl < LEVELS; lvl++) begin    // 计算虚拟地址
-          logic [VPN_SIZE-1:0] aux_vpn_req;
-          assign aux_vpn_req = (r_req.vpn >> ((LEVELS-lvl-1)*PAGE_LVL_BITS));
-          assign vpn_req[lvl] = aux_vpn_req[PAGE_LVL_BITS-1:0];
-      end
-  endgenerate
-  assign vpn_idx = vpn_req[count_q];
+  assign req_port_o.data_be = '1;
 
-  genvar c;
-  generate
-      for (c = 0; c < (LEVELS-1); c++) begin  // 用来判断是叶子节点还是中间表项
-          always_comb begin
-              if (pte.r || pte.w || pte.x) begin
-                  valid_pte_lvl[c] = (pte.ppn[((LEVELS-c-1)*PAGE_LVL_BITS)-1:0] == '0) ? dmem_ptw_comm_i.resp.data[0] : 1'b0; 
-              end else begin
-                  valid_pte_lvl[c] = dmem_ptw_comm_i.resp.data[0];
-              end
+  // PTW 转换过程：
+  // 1. a = stap.ppn × PAGESIZE 生成根页表的物理基地址，i = LEVELS - 1 表示当前在最顶层页表开始遍历， SV39 LEVELS = 3
+  // 2. 读取当前层页表项 PTE address = a + va.vpn[i] * PTESIZE，如果违反了PMA或PMP则抛出访问异常 access fault 异常
+  // 3. 检查页表项是否合法，检查V=1，或者r=0并且w=1是非法编码，抛出页错误异常 page-fault 异常
+  // 4. 判断是否到达叶子页表项，当 R=1 或 X=1，这个 PTE 是叶子结点，否则就是中间结点，指向下一级页表，如果进下一层页表返回第二步
+  // 5. 检查超级页对齐，如果不是最后一级就发现了叶子阶段，那么他就是一个大页，但是必须对齐，且如果PPN低位不为0，则说明对齐错误
+  // 6. 根据当前特权模式以及 mstatus 寄存器的 SUM 和 MXR 字段的值，
+  //    确定 pte.u 位是否允许请求的内存访问。如果不允许，则停止并引发与原始访问类型对应的缺页错误异常。
+  //         1) MXR 位修改加载程序访问虚拟内存的权限。当 MXR=0 时，只有从标记为可读的页面加载才会成功。
+  //            当 MXR=1 时，从标记为可读或可执行的页面（R=1 或 X=1）加载都会成功
+  //         2）SUM 位修改 S 模式加载和存储程序访问虚拟内存的权限。当 SUM=0 时，S 模式对 U 模式可访问的页面的内存访问会失败。当 SUM=1 时，允许这些访问。当基于页面的虚拟内存未启用时，SUM 位无效。
+  //            注意，虽然 SUM 通常在非 S 模式下执行时会被忽略，但当 MPRV=1 且 MPP=S 时，SUM 会生效。如果不支持 S 模式或 satp.MODE 为只读 0，则 SUM 为只读 0。
+  // 7. 如果实现了 Shadow Stack Memory Protection 扩展（安全机制），则额外检查 R/W/X 访问权限，否则可跳过。
+  // 8. 检查R/W/X权限
+  // 9.  如果 pte.a=0，或者原始内存访问是存储操作且 pte.d=0：
+  //        如果对pte 的存储操作会违反 PMA 或 PMP 检查，则抛出与原始访问类型对应的访问错误异常。
+  //        如果是原子指令：
+  //          将 pte 与地址 a+va.vpn[i]×PTESIZE 处的 PTE 值进行比较
+  //          如果值匹配，则将 pte.a 设置为 1，并且如果原始内存访问是存储操作，则还将 pte.d 设置为 1。如果失败返回步骤2
+  // 10. 转换成功。转换后的物理地址如下：
+  //        pa.pgoff = va.pgoff。
+  //        如果 i>0，则表示这是超级页转换，且 pa.ppn[i-1:0] = va.vpn[i-1:0]。
+  //        pa.ppn[LE​​VELS-1:i] = pte.ppn[LE​​VELS-1:i]。
+
+    always_comb begin : ptw
+    // 默认赋值（避免 latch）
+    tag_valid_n             = 1'b0;
+    req_port_o.data_req     = 1'b0;  // 缓存读取请求
+    req_port_o.data_size    = 2'(PtLevels);  // 读取大小（页表级数相关）
+    req_port_o.data_we      = 1'b0;  // 不写入（PTW只读）
+    ptw_error_o             = 1'b0;
+    ptw_error_at_g_st_o     = 1'b0;
+    ptw_err_at_g_int_st_o   = 1'b0;
+    ptw_access_exception_o  = 1'b0;
+    shared_tlb_update_valid = 1'b0;
+    is_instr_ptw_n          = is_instr_ptw_q;
+    ptw_lvl_n               = ptw_lvl_q;
+    ptw_pptr_n              = ptw_pptr_q;
+    state_d                 = state_q;
+    global_mapping_n        = global_mapping_q;
+    tlb_update_asid_n       = tlb_update_asid_q;
+    vaddr_n                 = vaddr_q;
+    shared_tlb_miss_o       = 1'b0;  // 默认TLB命中
+
+    case (state_q)
+      IDLE: begin  // 空闲状态：等待TLB未命中请求
+        ptw_lvl_n        = '0;  // 重置页表级别
+        global_mapping_n = 1'b0;  // 重置全局映射标志
+        is_instr_ptw_n   = 1'b0;  // 重置指令遍历标志
+
+        // 若TLB未命中且需要地址转换，则启动页表遍历, 共享tlb是tlb命中的最后一环
+        if (shared_tlb_access_i && ~shared_tlb_hit_i) begin
+          // 计算S-stage页表地址，特权级手册虚拟地址转换第一步，a = satp.ppn × PAGESIZE
+          ptw_pptr_n = {satp_ppn_i, shared_tlb_vaddr_i[SV-1:SV-(VpnLen/PtLevels)], (PtLevels)'(0)};
+
+          is_instr_ptw_n    = itlb_req_i;  // 标记是否为指令遍历
+          vaddr_n           = shared_tlb_vaddr_i;  // 保存未命中的虚拟地址
+          state_d           = WAIT_GRANT;  // 进入等待缓存授权状态
+          shared_tlb_miss_o = 1'b1;  // 记录TLB未命中
+
+          // 设置ASID
+          if (itlb_req_i) begin
+            tlb_update_asid_n = asid_i;
+          end else begin
+            tlb_update_asid_n = asid_i;
           end
-      end
-  endgenerate
-  assign valid_pte_lvl[LEVELS-1] = dmem_ptw_comm_i.resp.data[0];
-  assign pte.v = valid_pte_lvl[count_q];
-
-  assign invalid_pte = (((dmem_ptw_comm_i.resp.data >> (PPN_SIZE+10)) != '0) ||
-                        ((is_pte_table & pte.v & (pte.d || pte.a || pte.u)))) ? 1'b1 : 1'b0; //Make sure that N, PBMT and Reserved are 0
-
-  assign is_pte_table = pte.v && !pte.x && !pte.w && !pte.r;  // 指向中间页表
-  assign is_pte_leaf = pte.v && (pte.x || pte.w || pte.r);    // 叶子节点
-
-  //==================
-  // RISC-V  页表权限
-  //==================
-  assign is_pte_ur = is_pte_leaf && pte.u && pte.r;
-  assign is_pte_uw = is_pte_ur && pte.w;
-  assign is_pte_ux = pte.v && pte.x && pte.u;
-  assign is_pte_sr = is_pte_leaf && pte.r && !pte.u;
-  assign is_pte_sw = is_pte_sr && pte.w;
-  assign is_pte_sx = pte.v && pte.x && !pte.u;
-
-  // 计算下一级pte物理地址
-  logic [63:0] aux_pte_addr;
-  assign aux_pte_addr = {{(64-(PPN_SIZE+PAGE_LVL_BITS+$clog2(riscv_pkg::XLEN/8))){1'b0}}, {r_pte.ppn, vpn_idx, {{($clog2(riscv_pkg::XLEN/8))}{1'b0}}}};
-  assign pte_addr = aux_pte_addr[SIZE_VADDR:0] ; // Sv39: (r_pte.ppn << 12) + (vpn_idx << 3)
-
-  // PTW Ready
-  assign ptw_ready = (current_state == S_READY);
-
-  // Catch Request from TLB(Arb) & PTE response from dmem
-  always_ff @(posedge clk_i, negedge rstn_i) begin
-      if (!rstn_i) begin
-          r_req <= '0;
-          r_pte <= '0;
-      end else begin
-          if ((current_state == S_WAIT) && dmem_ptw_comm_i.resp.valid) begin
-              r_pte <= pte;
-          end else if ((current_state == S_REQ) && pte_cache_hit && (count_q < $unsigned(LEVELS-1))) begin
-              r_pte.ppn <= pte_cache_data; 
-          end else if (ptw_ready & tlb_ptw_comm.req.valid) begin
-              r_req <= tlb_ptw_comm.req;
-              r_pte.ppn <= csr_ptw_comm_i.satp[PPN_SIZE-1:0];
-          end
-      end
-  end
-
-
-  //================
-  // PTW Cache
-  //================
-  ptw_ptecache_entry_t [PTW_CACHE_SIZE-1:0] ptecache_entry;
-  logic access_hit;
-  logic full_cache;
-  logic unsigned [$clog2(PTW_CACHE_SIZE)-1:0] hit_idx;              // 命中下标
-  logic unsigned [$clog2(PTW_CACHE_SIZE)-1:0] plru_eviction_idx;    // 替换下标
-  logic unsigned [$clog2(PTW_CACHE_SIZE)-1:0] priorityEncoder_idx;  // Cache未满时的写入下标
-  logic [PTW_CACHE_SIZE-1:0] valid_vector;
-  logic [PTW_CACHE_SIZE-1:0] hit_vector;
-
-  assign full_cache =& valid_vector; //And Reduction
-  assign pte_cache_hit =| hit_vector; //Or Reduction
-
-  pseudoLRU #(    // 最近替换算法
-    .ENTRIES(PTW_CACHE_SIZE)
-  ) ptw_PLRU (
-    .clk_i,
-    .rst_ni,
-    .access_hit_i       (access_hit),
-    .access_idx_i       (hit_idx),
-    .replacement_idx_o  (plru_eviction_idx)
-  );
-
-  always_comb begin
-    for (int i = 0; i < PTW_CACHE_SIZE; i++) begin
-      hit_vector[i] = ((ptecache_entry[i].tags == pte_addr) && ptecache_entry[i].valid (ptecache_entry[i].asid == csr_ptw_comm_i.satp[59:44])) ? 1'b1 : 1'b0;
-      valid_vector[i] = ptecache_entry[i].valid;
-    end
-  end
-
-  logic found;
-  always_comb begin
-    hit_idx = '0;
-    pte_cache_data = '0;
-    found = 1'b0; // Control variable
-    for (int i = 0; (i < PTW_CACHE_SIZE) && (!found); i++) begin
-      if (hit_vector[i]) begin
-        hit_idx = $unsigned(trunc_ptw_cache_size($unsigned(i)));
-        pte_cache_data = ptecache_entry[i].data;
-        found = 1'b1;
-      end
-    end
-  end
-
-  logic found2;
-  always_comb begin
-    priorityEncoder_idx = '0;
-    found2 = 1'b0;
-    for (int i = 0; (i < PTW_CACHE_SIZE) && (!found2); i++) begin
-      if (!valid_vector[i]) begin
-        priorityEncoder_idx = trunc_ptw_cache_size($unsigned(i));
-        found2 = 1'b1;
-      end
-    end
-  end
-
-  // Cache 更新
-  always_ff @(posedge clk or negedge rst_ni) begin
-    if(!rst_ni) begin
-      for(int i = 0; i < PTW_CACHE_SIZE; i++) begin
-        ptecache_entry[i] <= '0;
-        access_hit        <= 1'b0;
-      end
-    end
-    else begin
-      access_hit <= 1'b0;
-      // Cache写入
-      if (dmem_ptw_comm_i.resp.valid && is_pte_table && !pte_cache_hit) begin // 传回的数据有效+指向下一级页表+当前这个页表项不在cache中
-        if (full_cache) begin // Cache 已满，使用LRU替换算法
-          ptecache_entry[plru_eviction_idx].valid <= 1'b1;
-          ptecache_entry[plru_eviction_idx].tags  <= pte_addr;
-          ptecache_entry[plru_eviction_idx].data  <= pte.ppn;
-          ptecache_entry[plru_eviction_idx].asid  <= csr_ptw_comm_i.satp[59:44];
-        end
-        else begin  // 未满
-          ptecache_entry[priorityEncoder_idx].valid <= 1'b1;
-          ptecache_entry[priorityEncoder_idx].tags  <= pte_addr;
-          ptecache_entry[priorityEncoder_idx].data  <= pte.ppn;
-          ptecache_entry[priorityEncoder_idx].asid  <= csr_ptw_comm_i.satp[59:44];
         end
       end
-    end
-  end
 
-  // 页表项的访问权限检查逻辑
-  assign prv_req = r_req.prv; // prv_req = 当前请求的特权级 1=S 0=U
-
-  always_comb begin
-    if (prv_req[0]) begin // S模式
-          if (csr_ptw_comm_i.mstatus.sum) begin // S模式是否可以访问用户态
-            if (r_req.fetch) perm_ok = is_pte_sx || is_pte_ux;
-            else begin
-                if (r_req.store) perm_ok = is_pte_sw || is_pte_uw;
-                else if (csr_ptw_comm_i.mstatus.mxr) perm_ok = is_pte_sr || is_pte_ur || is_pte_ux || is_pte_sx;
-                else perm_ok = is_pte_sr || is_pte_ur;
-            end
-        end else begin
-            if (r_req.fetch) perm_ok = is_pte_sx;
-            else begin
-                if (r_req.store) perm_ok = is_pte_sw;
-                else if (csr_ptw_comm_i.mstatus.mxr) perm_ok = is_pte_sr || is_pte_sx;
-                else perm_ok = is_pte_sr;
-            end
+      WAIT_GRANT: begin  // 等待缓存授权：发送页表读取请求
+        req_port_o.data_req = 1'b1;  // 向缓存发送读取请求
+        if (req_port_i.data_gnt) begin  // 缓存允许请求
+          tag_valid_n = 1'b1;  // 标记缓存标签有效
+          state_d     = PTE_LOOKUP;  // 进入解析PTE状态
         end
-    end else begin // U模式
-        if (r_req.fetch) perm_ok = is_pte_ux;
-        else begin
-            if (r_req.store) perm_ok = is_pte_uw;
-            else if (csr_ptw_comm_i.mstatus.mxr) perm_ok = is_pte_ur || is_pte_ux;
-            else perm_ok = is_pte_ur;
-        end
-    end
-  end
-
-  // PTW向内存发送请求
-  always_comb begin
-    pte_wdata = '0;
-    pte_wdata.a = 1'b1;
-  end
-
-  assign ptw_dmem_comm_o.req.phys = 1'b1;
-  assign ptw_dmem_comm_o.req.cmd  = M_XRD;
-  assign ptw_dmem_comm_o.req.typ  = MT_D;
-  assign ptw_dmem_comm_o.req.addr = pte_addr;
-  assign ptw_dmem_comm_o.req.kill = 1'b0;
-  assign ptw_dmem_comm_o.req.data = { {(64-$bits(pte_wdata)){1'b0}},
-                                    pte_wdata.ppn, 
-                                    pte_wdata.rfs, 
-                                    pte_wdata.d,
-                                    pte_wdata.a,
-                                    pte_wdata.g,
-                                    pte_wdata.u,
-                                    pte_wdata.x,
-                                    pte_wdata.w,
-                                    pte_wdata.r,
-                                    pte_wdata.v
-                                    };
-
-  // TLB 回复
-  assign resp_err = (current_state == S_ERROR);
-  assign resp_val = (current_state == S_DONE) || resp_err;
-
-  assign r_resp_ppn = {{(64-(SIZE_VADDR-11)){1'b0}}, pte_addr[SIZE_VADDR:12]}; // pte_addr >> 12
-  genvar j;
-  generate
-      for (j = 0; j < (LEVELS-1); j++) begin
-          logic [63:0] aux_resp_ppn_lvl;
-          assign aux_resp_ppn_lvl = {{(64-$bits(r_resp_ppn[63:(LEVELS-j-1)*PAGE_LVL_BITS])-$bits(r_req.vpn[PAGE_LVL_BITS*(LEVELS-j-1)-1:0])){1'b0}}, 
-                                      r_resp_ppn[63:(LEVELS-j-1)*PAGE_LVL_BITS], 
-                                      r_req.vpn[PAGE_LVL_BITS*(LEVELS-j-1)-1:0]};
-          assign resp_ppn_lvl[j] = aux_resp_ppn_lvl[PPN_SIZE-1:0];
       end
-  endgenerate
-  assign resp_ppn_lvl[LEVELS-1] = r_resp_ppn[PPN_SIZE-1:0];
-  assign resp_ppn = resp_ppn_lvl[count_q];
 
-  // TLB送往仲裁器
-  assign ptw_tlb_comm.resp.valid = resp_val;
-  assign ptw_tlb_comm.resp.error = resp_err;
-  assign ptw_tlb_comm.resp.level = count_q;
-  assign ptw_tlb_comm.resp.pte.ppn = resp_ppn;
-  assign ptw_tlb_comm.resp.pte.rfs = r_pte.rfs;
-  assign ptw_tlb_comm.resp.pte.d = r_pte.d;
-  assign ptw_tlb_comm.resp.pte.a = r_pte.a;
-  assign ptw_tlb_comm.resp.pte.g = r_pte.g;
-  assign ptw_tlb_comm.resp.pte.u = r_pte.u;
-  assign ptw_tlb_comm.resp.pte.x = r_pte.x;
-  assign ptw_tlb_comm.resp.pte.w = r_pte.w;
-  assign ptw_tlb_comm.resp.pte.r = r_pte.r;
-  assign ptw_tlb_comm.resp.pte.v = r_pte.v;
-  assign ptw_tlb_comm.ptw_ready = ptw_ready;
-  assign ptw_tlb_comm.ptw_status = csr_ptw_comm_i.mstatus;
-  assign ptw_tlb_comm.invalidate_tlb = csr_ptw_comm_i.flush;
+      PTE_LOOKUP: begin  // 解析PTE：检查有效性、权限，决定下一步
+        if (data_rvalid_q) begin  // 缓存返回的PTE数据有效
+          // 检查PTE的全局映射位（g位）
+          if (pte.g) global_mapping_n = 1'b1;
 
-  always_ff @(posedge clk_i, negedge rstn_i) begin
-    if (!rstn_i) begin
-        current_state <= S_READY;
-        count_q <= '0;
-    end
-    else begin
-        current_state <= next_state;
-        count_q <= count_d;
-    end
-  end
-
-  always_comb begin
-    count_d = count_q;
-    count = count_q + 1'b1;
-    pmu_ptw_hit_o = 1'b0;
-    pmu_ptw_miss_o = 1'b0;
-    ptw_dmem_comm_o.req.valid = 1'b0;
-    next_state = current_state;
-    case (current_state)
-        S_READY : begin
-            count_d = '0;
-            if (tlb_ptw_comm.req.valid) next_state = S_REQ;
-            else next_state = S_READY;
-        end
-        S_REQ : begin
-            ptw_dmem_comm_o.req.valid = 1'b1;
-            if (pte_cache_hit && (count_q < $unsigned(LEVELS-1))) begin
-                ptw_dmem_comm_o.req.valid = 1'b0;
-                pmu_ptw_hit_o = 1'b1;
-                count_d = count[1:0];
-                next_state = S_REQ;
-            end else if (dmem_ptw_comm_i.dmem_ready) begin
-                next_state = S_WAIT;
-            end else begin
-                next_state = S_REQ;
-            end
-        end
-        S_WAIT : begin
-            if (dmem_ptw_comm_i.resp.nack) begin
-                next_state = S_REQ;
-            end else if (dmem_ptw_comm_i.resp.valid) begin
-                if (invalid_pte) begin
-                    next_state = S_ERROR;
-                end else if (is_pte_table && (count_q < $unsigned(LEVELS-1))) begin
-                    count_d = count[1:0];
-                    pmu_ptw_miss_o = 1'b1;
-                    next_state = S_REQ;
-                end else if (is_pte_leaf) begin
-                    next_state = S_DONE;
+          // 无效PTE检查（RISC-V规范）：
+          // 1. PTE有效位v=0；2. 读权限r=0但写权限w=1；3. 保留位非0
+          if (!pte.v || (!pte.r && pte.w) || (|pte.reserved ))
+            state_d = PROPAGATE_ERROR;  // 异常
+          else begin  // PTE有效
+            state_d = LATENCY;  // 默认进入延迟状态
+            // 叶子PTE（r=1或x=1，表示找到最终物理页）
+            if (pte.r || pte.x) begin // 叶子结点
+              if (is_instr_ptw_q) begin
+                // 指令遍历：PTE必须可执行（x=1）且访问位a=1，否则出错
+                if (!pte.x || !pte.a) begin
+                  state_d = PROPAGATE_ERROR;
                 end 
-                else begin
-                    next_state = S_ERROR;
+                else 
+                  shared_tlb_update_valid = 1'b1;  // 遍历成功，更新TLB
+              end 
+              else begin  // 数据遍历
+                // 数据遍历：PTE必须可读（r=1）且访问位a=1；存储操作需可写（w=1）且脏位d=1
+                if ((pte.a && (pte.r || (pte.x && mxr_i ))) && (!lsu_is_store_i || (pte.w && pte.d))) begin
+                  shared_tlb_update_valid = 1'b1;  // 遍历成功，更新TLB
+                end else begin
+                  state_d = PROPAGATE_ERROR;  // 权限不足，抛出错误
                 end
+              end
+
+              // 检查超级页是否对齐，未对齐则出错
+              if (|misaligned_page) begin
+                state_d = PROPAGATE_ERROR;
+                shared_tlb_update_valid = 1'b0;
+              end
+            end 
+            
+            else begin  // 非叶子PTE（指向更低级页表）
+              if (ptw_lvl_q[0] == PtLevels - 1) begin  // 已到最低级，仍非叶子PTE→错误
+                ptw_lvl_n[0] = ptw_lvl_q[0];
+                state_d = PROPAGATE_ERROR;
+              end else begin  // 继续遍历下一级页表
+                ptw_lvl_n[0] = ptw_lvl_q[0] + 1'b1;  // 页表级别+1
+                state_d = WAIT_GRANT;  // 再次发送读取请求
+                ptw_pptr_n = {pte.ppn, vaddr_lvl[0][ptw_lvl_q[0]], (PtLevels)'(0)};  // 非虚拟化
+              end
             end
-            else begin 
-                next_state = S_WAIT;
-            end
+          end
+
+          // 检查PMP权限，不允许则触发访问异常
+          if (!allow_access) begin
+            shared_tlb_update_valid = 1'b0;
+            ptw_pptr_n = ptw_pptr_q;  // 保存出错地址
+            state_d = PROPAGATE_ACCESS_ERROR;
+          end
         end
-        S_DONE : begin
-            next_state = S_READY;
-        end
-        S_ERROR : begin
-            next_state = S_READY;
-        end
+      end
+
+      PROPAGATE_ERROR: begin  // 传播页表错误（如无效PTE）
+        state_d = LATENCY;
+        ptw_error_o = 1'b1;  // 标记页表错误
+      end
+
+      PROPAGATE_ACCESS_ERROR: begin  // 传播PMP访问错误
+        state_d = LATENCY;
+        ptw_access_exception_o = 1'b1;  // 标记PMP错误
+      end
+
+      WAIT_RVALID: begin  // 等待缓存数据有效（刷新时用）
+        if (data_rvalid_q) state_d = IDLE;
+      end
+
+      LATENCY: begin  // 延迟状态（时序对齐）
+        state_d = IDLE;
+      end
+
+      default: state_d = IDLE;
     endcase
+
+    // 处理刷新信号（清空状态）
+    if (flush_i) begin
+      if (((state_q inside {PTE_LOOKUP, WAIT_RVALID}) && !data_rvalid_q) || ((state_q == WAIT_GRANT) && req_port_i.data_gnt))
+        state_d = WAIT_RVALID;  // 等待缓存数据返回后再空闲
+      else state_d = LATENCY;  // 直接进入延迟状态后空闲
+    end
   end
 
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni) begin
+      state_q           <= IDLE;
+      is_instr_ptw_q    <= 1'b0;
+      ptw_lvl_q         <= '0;
+      tag_valid_q       <= 1'b0;
+      tlb_update_asid_q <= '0;
+      vaddr_q           <= '0;
+      ptw_pptr_q        <= '0;
+      global_mapping_q  <= 1'b0;
+      data_rdata_q      <= '0;
+      data_rvalid_q     <= 1'b0;
+    end else begin
+      state_q           <= state_d;
+      ptw_pptr_q        <= ptw_pptr_n;
+      is_instr_ptw_q    <= is_instr_ptw_n;
+      ptw_lvl_q         <= ptw_lvl_n;
+      tag_valid_q       <= tag_valid_n;
+      tlb_update_asid_q <= tlb_update_asid_n;
+      vaddr_q           <= vaddr_n;
+      global_mapping_q  <= global_mapping_n;
+      data_rdata_q      <= req_port_i.data_rdata;
+      data_rvalid_q     <= req_port_i.data_rvalid;
+    end
+  end
+  
 endmodule

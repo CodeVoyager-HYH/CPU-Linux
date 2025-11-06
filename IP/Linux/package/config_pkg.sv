@@ -12,7 +12,8 @@ localparam int               LOAD_BUFF_SIZE   = 8;
 localparam NrPMPEntries = 16; // PMP entries 数量
 localparam MODE_SV = 8;
 localparam SV =  39;
-  // --------------------
+localparam NrMaxRules = 16;
+
 // 非密等区域
 localparam                   NrMaxRules       = 16; // 非密等区域最大的配置数量
 int unsigned                 NrNonIdempotentRules;  // 非幂等区域的规则数量
@@ -49,6 +50,19 @@ typedef enum logic [1:0] {
   } amo_t;
 
   // 函数 用于32位值进行符号扩展
+  function automatic logic is_inside_execute_regions(logic [63:0] address);
+    logic [NrMaxRules-1:0] pass;
+    if (NrExecuteRegionRules != 0) begin
+      pass = '0;
+      for (int unsigned k = 0; k < NrExecuteRegionRules; k++) begin
+        pass[k] = range_check(ExecuteRegionAddrBase[k], ExecuteRegionLength[k], address);
+      end
+      return |pass;
+    end else begin
+      return 1;
+    end
+  endfunction : is_inside_execute_regions
+
   function automatic logic [63:0] sext32to64(logic [31:0] operand);
     return {{32{operand[31]}}, operand[31:0]};
   endfunction
