@@ -21,8 +21,8 @@ logic [NrMaxRules-1:0][63:0] NonIdempotentAddrBase; // 地址起始
 logic [NrMaxRules-1:0][63:0] NonIdempotentLength;   // 地址范围
 localparam                   POINTER_SIZE     = $clog2(NR_SB_ENTRIES);
 
-// 定义 RISC-V 特权级别
-typedef enum logic [1:0] {
+  // 定义 RISC-V 特权级别
+  typedef enum logic [1:0] {
     PRIV_LVL_M  = 2'b11,
     PRIV_LVL_HS = 2'b10,
     PRIV_LVL_S  = 2'b01,
@@ -65,6 +65,15 @@ typedef enum logic [1:0] {
 
   function automatic logic [63:0] sext32to64(logic [31:0] operand);
     return {{32{operand[31]}}, operand[31:0]};
+  endfunction
+  
+  function automatic logic is_amo(fu_op op);
+    case (op) inside
+      [AMO_LRW : AMO_MINDU]: begin
+        return 1'b1;
+      end
+      default: return 1'b0;
+    endcase
   endfunction
   
   function automatic logic [1:0] extract_transfer_size(fu_op op);
