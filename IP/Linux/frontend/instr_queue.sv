@@ -16,8 +16,9 @@ module instr_queue
 
     input logic  valid_i,                                  // 指示输入是可以使用的
     input logic [config_pkg::XLEN-1:0] instr_i,
-    input logic [config_pkg::VLEN-1:0] addr_i,                
-    input logic backend_ready_i,                                // 表示后端已经准备就绪
+    input logic [config_pkg::VLEN-1:0] addr_i,             
+    input frontend_exception_t         exception_i,
+    input logic backend_ready_i,                           // 表示后端已经准备就绪
     input config_pkg::cf_t  cf_type_i,                     // 表示跳转类型
     input logic [config_pkg::VLEN-1:0] predict_address_i,  // 预测地址                  
 
@@ -85,10 +86,11 @@ module instr_queue
     // ---------------------------
     if (!fifo_full) begin //fifo 未满写入
       if(valid_i) begin            //写入第一条指令
-        fifo_data_in0.address      = addr_i;
-        fifo_data_in0.instruction  = instr_i;
-        fifo_data_in0.branch_predict.cf = cf_type_i;
-        fifo_data_in0.branch_predict.predict_address = predict_address_i;
+        fifo_data_in0.ex_vaddr        = addr_i;
+        fifo_data_in0.instr           = instr_i;
+        fifo_data_in0.cf              = cf_type_i;
+        fifo_data_in0.predict_address = predict_address_i;
+        fifo_data_in0.ex              = exception_i;
         fifo_push0 = 1'b1;
         consumed_n = 1'b1;
       end

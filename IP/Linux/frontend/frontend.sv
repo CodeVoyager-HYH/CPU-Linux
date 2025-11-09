@@ -4,7 +4,9 @@
   //      |                             |<———————
   //      |_____________________________|
 
-module fromtend #(
+module fromtend 
+  import config_pkg::*;
+#(
     parameter type fetch_entry_t      = logic,
     parameter type icache_data_res_t  = logic,
     parameter type icache_data_req_t  = logic
@@ -15,18 +17,21 @@ module fromtend #(
     input   logic halt_i,
     input   logic flush_bp_i,
     input   logic halt_frontend_i,
-    
-    input   logic [config_pkg::VLEN-1:0]      boot_addr_i,               // 复位pc值
+    input   logic set_pc_commit_i,
 
-    input   bp_resolve_t      resolved_branch_i,         // 分支预测结果，用来更新分支预测器
+    input   logic [VLEN-1:0]  boot_addr_i,        // 复位pc值
+    input   logic [VLEN-1:0]  trap_vector_base_i, //异常入口基地址
+    input   logic                         eret_i,             //异常返回信号
+    input   logic [VLEN-1:0]  epc_i,
+    input   bp_resolve_t                  resolved_branch_i,  // 分支预测结果，用来更新分支预测器
     // ICache
-    input   icache_data_req_t icache_dreq_i,  // 前端送到ICache的请求包
-    output  icache_data_res_t icache_dreq_o,  // ICache返回给前端的响应包
+    input   icache_data_req_t             icache_dreq_i,      // 前端送到ICache的请求包
+    output  icache_data_res_t             icache_dreq_o,      // ICache返回给前端的响应包
 
-    input   logic             backend_ready_i,
+    input   logic                         backend_ready_i,
 
-    output fetch_entry_t      fetch_entry_o,
-    output logic              fetch_entry_valid_o
+    output fetch_entry_t                  fetch_entry_o,
+    output logic                          fetch_entry_valid_o
 );
     
 // =====================================
@@ -36,7 +41,7 @@ module fromtend #(
   // 分支历史表更新信息：是否有效，更新地址，是否跳转
   localparam type bht_update_t = struct packed {
     logic                        valid;
-    logic [config_pkg::VLEN-1:0] pc;     // update at PC
+    logic [VLEN-1:0] pc;     // update at PC
     logic                        taken;
   };
 
@@ -48,36 +53,36 @@ module fromtend #(
   // 返回地址栈：是否有效，返回地址
   localparam type ras_t = struct packed {
     logic                        valid;
-    logic [config_pkg::VLEN-1:0] ra;
+    logic [VLEN-1:0] ra;
   };
 
   // BTB
   localparam type btb_update_t = struct packed {
     logic                        valid;
-    logic [config_pkg::VLEN-1:0] pc;              // update at PC
-    logic [config_pkg::VLEN-1:0] target_address;
+    logic [VLEN-1:0] pc;              // update at PC
+    logic [VLEN-1:0] target_address;
   };
 
   localparam type btb_prediction_t = struct packed {
-    logic [config_pkg::VLEN-1:0] target_address; // BTB 预测的目标地址
+    logic [VLEN-1:0] target_address; // BTB 预测的目标地址
     logic                        hit;            // 预测是否命中 (Tag 匹配且 Valid 为真)
   };
 
-  logic [config_pkg::VLEN-1:0]  icache_vaddr_q ;
-  logic [config_pkg::XLEN-1:0]  icache_data  ;
+  logic [VLEN-1:0]  icache_vaddr_q ;
+  logic [XLEN-1:0]  icache_data  ;
   logic                         icache_valid ;
-  logic [config_pkg::XLEN-1:0]  icache_data_q;
+  logic [XLEN-1:0]  icache_data_q;
   logic                         icache_valid_q;
-  logic [config_pkg::VLEN-1:0]  icache_vaddr_q;
+  logic [VLEN-1:0]  icache_vaddr_q;
   logic                         instr_queue_ready;
   logic                         instr_queue_consumed;
-  logic [config_pkg::VLEN-1:0]  npc_d,npc_q;
+  logic [VLEN-1:0]  npc_d,npc_q;
   logic                         replay;
-  logic [config_pkg::VLEN-1:0]  replay_addr;
+  logic [VLEN-1:0]  replay_addr;
   logic                         taken_rvi_cf;
-  logic [config_pkg::VLEN-1:0]  predict_address;
+  logic [VLEN-1:0]  predict_address;
   logic ras_push, ras_pop;
-  logic [config_pkg::VLEN-1:0]  ras_update;
+  logic [VLEN-1:0]  ras_update;
 
 //===================
 // instr_scan
@@ -93,7 +98,7 @@ module fromtend #(
   logic                        rvi_branch;
   logic                        rvi_jalr;
   logic                        rvi_jump;
-  logic [config_pkg::VLEN-1:0] rvi_imm;
+  logic [VLEN-1:0] rvi_imm;
 
   instr_scan i_instr_scan (
     .instr_i     (icache_data_q),
@@ -142,12 +147,12 @@ module fromtend #(
   assign bht_prediction_shifted     =  bht_prediction;
   assign btb_prediction_shifted     =  btb_prediction;
   assign bht_update.valid           =  resolved_branch_i.valid
-                                    & (resolved_branch_i.cf_type == config_pkg::Branch);
+                                    & (resolved_branch_i.cf_type == Branch);
   assign bht_update.pc              =  resolved_branch_i.pc;
   assign bht_update.taken           =  resolved_branch_i.is_taken;
   assign btb_update.valid           =  resolved_branch_i.valid
                                     &  resolved_branch_i.is_mispredict
-                                    & (resolved_branch_i.cf_type == config_pkg::JumpR);
+                                    & (resolved_branch_i.cf_type == JumpR);
   assign btb_update.pc              =  resolved_branch_i.pc;
   assign btb_update.target_address  =  resolved_branch_i.target_address;
 
@@ -159,7 +164,7 @@ module fromtend #(
     predict_address = '0;
 
     // 有记录就跳转，无记录就静态分支预测
-    cf_type = config_pkg::NoCF;
+    cf_type = NoCF;
 
     ras_push = 1'b0;
     ras_pop = 1'b0;
@@ -174,7 +179,7 @@ module fromtend #(
             ras_push = 1'b0;
             if(btb_prediction_shifted.hit) begin
               predict_address = btb_prediction_shifted.target_address;
-              cf_type = config_pkg::JumpR;
+              cf_type = JumpR;
             end
           end
           // its an unconditional jump to an immediate
@@ -183,14 +188,14 @@ module fromtend #(
             ras_push = 1'b0;
             taken_rvi_cf = rvi_jump;
             taken_rvc_cf = rvc_jump;
-            cf_type = config_pkg::Jump;
+            cf_type = Jump;
           end
           // return
           4'b0100: begin
             ras_pop = ras_predict.valid & instr_queue_consumed;
             ras_push = 1'b0;
             predict_address = ras_predict.ra;
-            cf_type = config_pkg::Return;
+            cf_type = Return;
           end
           // branch prediction
           4'b1000: begin
@@ -200,11 +205,11 @@ module fromtend #(
               taken_rvi_cf = rvi_branch & bht_prediction_shifted.taken;
               taken_rvc_cf = rvc_branch & bht_prediction_shifted.taken;
             end else begin
-              taken_rvi_cf = rvi_branch & rvi_imm[config_pkg::VLEN-1];
-              taken_rvc_cf = rvc_branch & rvc_imm[config_pkg::VLEN-1];
+              taken_rvi_cf = rvi_branch & rvi_imm[VLEN-1];
+              taken_rvc_cf = rvc_branch & rvc_imm[VLEN-1];
             end
             if (taken_rvi_cf || taken_rvc_cf) begin
-              cf_type = config_pkg::Branch;
+              cf_type = Branch;
             end
           end
           default: ;
@@ -266,6 +271,7 @@ module fromtend #(
     .addr_i                 (icache_vaddr_q),
     .backend_ready_i        (backend_ready_i),
     .cf_type_i              (cf_type),
+    .icache_ex_valid        (icache_ex_valid_q),
     .predict_address_i      (predict_address),
 
     .ready_o                (instr_queue_ready),
@@ -317,7 +323,7 @@ module fromtend #(
   assign icache_data = icache_dreq_i.data;
   
   always_comb begin : select_pc
-    automatic logic [config_pkg::VLEN-1:0] fetch_address;
+    automatic logic [VLEN-1:0] fetch_address;
 
     // 复位
     if(npc_rst_load_q) begin
@@ -338,7 +344,7 @@ module fromtend #(
     // 默认
     if (if_ready) begin
       npc_d = {
-        fetch_address[config_pkg::VLEN-1:config_pkg::FETCH_ALIGN_BITS] + 1, {config_pkg::FETCH_ALIGN_BITS{1'b0}}
+        fetch_address[VLEN-1:FETCH_ALIGN_BITS] + 1, {FETCH_ALIGN_BITS{1'b0}}
       };
     end
     // 重放
@@ -349,8 +355,18 @@ module fromtend #(
     if (is_mispredict) begin
       npc_d = resolved_branch_i.target_address;
     end
-
+    // eret
+    if (eret_i) begin //异常返回
+      npc_d = epc_i;
+    end
+    // 5. 异常中断
+    if (ex_valid_i) begin 
+      npc_d = trap_vector_base_i;
+    end
     icache_dreq_o.vaddr = fetch_address;
+  end
+  if (set_pc_commit_i) begin
+    npc_d = pc_commit_i + (halt_i ? '0 : {{VLEN - 3{1'b0}}, 3'b100});
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -361,10 +377,7 @@ module fromtend #(
       icache_data_q     <= '0;
       icache_valid_q    <= 1'b0;
       icache_vaddr_q    <= 'b0;
-      // icache_gpaddr_q   <= 'b0;
-      // icache_tinst_q    <= 'b0;
-      // icache_gva_q      <= 1'b0;
-      // icache_ex_valid_q <= ariane_pkg::FE_NONE;
+      icache_ex_valid_q <= FE_NONE;
 
     end 
     else begin
@@ -376,6 +389,15 @@ module fromtend #(
         icache_data_q  <= icache_data;
         icache_vaddr_q <= icache_dreq_i.vaddr;
       end
+      if (icache_dreq_i.ex.cause == INSTR_GUEST_PAGE_FAULT) begin
+          icache_ex_valid_q <= FE_INSTR_GUEST_PAGE_FAULT;
+        end else if (icache_dreq_i.ex.cause == INSTR_PAGE_FAULT) begin
+          icache_ex_valid_q <= FE_INSTR_PAGE_FAULT;
+        end else if (icache_dreq_i.ex.cause == INSTR_ACCESS_FAULT) begin
+          icache_ex_valid_q <= FE_INSTR_ACCESS_FAULT;
+        end else begin
+          icache_ex_valid_q <= FE_NONE;
+        end
     end
   end 
 
